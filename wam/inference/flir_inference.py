@@ -48,7 +48,9 @@ class PiZeroTeleop:
                  front_cam_serial: str,
                  checkpoint_path: str,
                  model_config: str,
-                 send_interval: float = 0.2,
+                 control_hz: int = 10,
+                 action_horizon: int = 5,
+                 loop_hz: int = 30,
                  display_scale: int = 3,
                  debug: bool = False,
                  offline: bool = False,
@@ -58,7 +60,11 @@ class PiZeroTeleop:
         self.debug = debug
         self.offline = offline
         self.display_scale = display_scale
-        self.send_interval = send_interval
+        self.action_horizon = action_horizon
+        self.control_hz = control_hz
+        self.save_action_step_size = max(1, int(round(self.loop_hz / self.control_hz)))
+        self.send_interval = self.action_horizon / self.control_hz
+        self.loop_hz = loop_hz
         self.last_send_time = 0.0
         self.mode = mode
 
@@ -68,7 +74,7 @@ class PiZeroTeleop:
         self.recv_port = recv_port
         self.DOF = dof
         self.udp_handler = TeleopUDPHandler(self.remote_ip, self.send_port, self.recv_port, DOF=self.DOF)
-        self.udp_stream = InterpolatingStreamer(self.udp_handler, self.DOF, self.send_interval, stream_hz=100, action_horizon=5)
+        self.udp_stream = InterpolatingStreamer(self.udp_handler, self.DOF, self.send_interval, stream_hz=100, action_horizon=self.action_horizon)
 
         # Camera Configuration
         cprint("Initializing Harvesters and FLIR Cameras...", "green")
@@ -143,9 +149,9 @@ class PiZeroTeleop:
                 elif self.recording_state == "PENDING":
                     if k == 's':
                         ep_name = f"episode_{int(time.time())}_{self.episode_counter}"
-                        self.recorder.save_episode(ep_name)
                         self.episode_counter += 1
                         self.recording_state = "IDLE"
+                        self.recorder.save_episode(ep_name, action_step_size=self.save_action_step_size)
                         cprint("[RECORDER] Ready for next episode. Press [R] to start.", "cyan")
                     elif k == 'd':
                         self.recorder.clear()
@@ -242,11 +248,16 @@ class PiZeroTeleop:
 
             signal.signal(signal.SIGINT, force_shutdown)
             
+            loop_delay = 1 / self.loop_hz
             while self.system_running:
+                loop_start_time = time.time()
                 
                 # Read images
-                status, front_image, wrist_image = self._read_images()
-                if not status: 
+                img_status, front_image, wrist_image = self._read_images()
+                state_status, jp_state = self._read_state()
+                if not img_status or not state_status: 
+                    cprint("State or images not received yet, waiting...", "red")
+                    time.sleep(loop_delay)
                     continue
 
                 # Update display windows if debugging
@@ -254,39 +265,31 @@ class PiZeroTeleop:
                     cprint("Quitting...", "red")
                     break
                 
-                # Only compute new actions every send_interval
-                now = time.time()
-                if now - self.last_send_time < self.send_interval:
-                    if not self.debug: 
-                        time.sleep(0.005)
-                    continue
-                
-                # Read robot state
-                status, jp_state = self._read_state()
-                if not status:
-                    cprint("No robot state received yet, waiting...", "red")
-                    self.last_send_time = now
-                    continue
-                    
-                # Infer + send to WAM
-                if "infer" in self.mode:
-                    action_chunk = self._model_inference(front_image, wrist_image, jp_state)
-
-                    if not self.udp_stream.running:
-                        self.udp_stream.start()
-                    self.udp_stream.update_chunk(action_chunk)
-                
-                    if self.debug:
-                        cprint("--- New chunk ---", "blue")
-                        for act in action_chunk:
-                            act = act[:self.DOF]
-                            cprint(f"Action from chunk: {np.round(act, 3)}", "cyan")
-
                 # Recording
                 if "record" in self.mode and self.recording_state == "RECORDING":
                     self.recorder.add_step(wrist_image, front_image, jp_state)
+                
+                # Infer + send to WAM
+                if (loop_start_time - self.last_send_time) >= self.send_interval:
+                    if "infer" in self.mode:
+                        action_chunk = self._model_inference(front_image, wrist_image, jp_state)
 
-                self.last_send_time = now
+                        if not self.udp_stream.running:
+                            self.udp_stream.start()
+                        self.udp_stream.update_chunk(action_chunk)
+                    
+                        if self.debug:
+                            cprint("--- New chunk ---", "blue")
+                            for act in action_chunk:
+                                act = act[:self.DOF]
+                                cprint(f"Action from chunk: {np.round(act, 3)}", "cyan")
+                    self.last_send_time = loop_start_time
+
+                # sleep, accounting for the time the loop already took to try and keep the desired frequency
+                elapsed_time = time.time() - loop_start_time
+                sleep_time = max(0.0, loop_delay - elapsed_time)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
         except Exception as e:
             import traceback

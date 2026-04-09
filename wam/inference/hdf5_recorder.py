@@ -26,10 +26,21 @@ class HDF5Recorder:
             self.data_dict["images/front"].append(front_img)
             self.data_dict["state/joints"].append(joints)
 
-    def save_episode(self, episode_name: str):
+    def save_episode(self, episode_name: str, action_step_size: int = 1):
         with self.lock:
             data_to_save = self.data_dict
             self.clear()
+            
+        states = np.array(data_to_save["state/joints"])
+        
+        # --- POST-HOC ACTION COMPUTATION (N-Step) ---
+        actions = np.zeros_like(states)
+        
+        if len(states) > action_step_size:
+            # Calculate N-step delta: state[t + k] - state[t]
+            actions[:-action_step_size] = states[action_step_size:] - states[:-action_step_size]
+        
+        data_to_save["actions"] = actions
             
         filepath = os.path.join(self.save_dir, f"{episode_name}.hdf5")
         cprint(f"\n[RECORDER] Saving episode with {len(data_to_save['state/joints'])} steps to {filepath}...", "yellow")
