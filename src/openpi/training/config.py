@@ -462,6 +462,66 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
         )
 
 
+# TODO: double check this, it's from Jun's lab repo.
+@dataclasses.dataclass(frozen=True)
+class LeRobotTaskDataConfig(DataConfigFactory):
+    """
+    Data config for custom LeRobot datasets that store the instruction in the "task" field.
+
+    The dataset is expected to have keys:
+      - image
+      - wrist_image
+      - state
+      - actions
+      - task  (string instruction)
+    """
+
+    extra_delta_transform: bool = False
+    prompt_key: str = "task"
+    # If set, overrides the default normalization choice.
+    use_quantile_norm: bool | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        base_config = self.create_base_config(assets_dirs, model_config)
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": self.prompt_key,
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            base_config,
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            use_quantile_norm=(
+                self.use_quantile_norm
+                if self.use_quantile_norm is not None
+                else base_config.use_quantile_norm
+            ),
+        )
+
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -968,6 +1028,51 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
+    
+    # Configs from Jun's lab for training:
+    # Will probably have to do this on the 3090 to have enough VRAM.
+    TrainConfig(
+        name="pi05_lora_finetune",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTaskDataConfig(
+            repo_id="/mnt/lerobot_data", # TODO UPDATE THIS PROPERLY
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_key="prompt",
+            extra_delta_transform=False,
+            use_quantile_norm=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1200,
+            peak_lr=2e-5,
+            decay_steps=20000,
+            decay_lr=2e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=30000,
+        batch_size=32,
+        save_interval=1000,
+        keep_period=1000,
+        log_action_samples=True,
+        log_interval=30,
+        log_prompt_samples=True,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
