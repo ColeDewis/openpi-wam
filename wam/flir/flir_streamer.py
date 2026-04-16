@@ -6,12 +6,13 @@ from genicam.gentl import TimeoutException
 from harvesters.core import Harvester
 from termcolor import cprint
 
+
 def buffer_to_image(buffer):
     component = buffer.payload.components[0]
     width = component.width
     height = component.height
     data_format = component.data_format
-    
+
     raw_data = component.data.copy()
 
     if "Mono" in data_format:
@@ -42,8 +43,18 @@ def buffer_to_image(buffer):
 
 
 class FLIRStream:
-    def __init__(self, device):
-        self.device = device
+    def __init__(self, harvester: Harvester, serial_num: str = None):
+        self.harvester = harvester
+        self.serial_num = serial_num
+
+        cprint(
+            f"Opening FLIR camera {serial_num if serial_num else 'default'}...", "cyan"
+        )
+        if self.serial_num:
+            self.device = self.harvester.create({"serial_number": str(self.serial_num)})
+        else:
+            self.device = self.harvester.create()
+
         self.latest_image = None
         self.running = False
         self.lock = threading.Lock()
@@ -61,20 +72,19 @@ class FLIRStream:
                 with self.device.fetch(timeout=0.5) as buffer:
                     if len(buffer.payload.components) == 0:
                         continue
-                    
+
                     img = buffer_to_image(buffer)
                     with self.lock:
                         self.latest_image = img
             except TimeoutException:
-                # Silently ignore dropped frames and try again
                 continue
             except Exception as e:
-                # If the main thread destroys the GenTL device during shutdown,
-                # catch the ClosedException and exit the loop gracefully.
                 if not self.running:
                     break
                 else:
-                    cprint(f"Unexpected FLIR stream error: {e}", "red")
+                    cprint(
+                        f"Unexpected FLIR stream error on {self.serial_num}: {e}", "red"
+                    )
                     time.sleep(0.05)
 
     def read(self):
@@ -89,13 +99,7 @@ class FLIRStream:
             self.thread.join(timeout=1.0)
         try:
             self.device.stop()
-        except Exception:
-            pass
-
-
-def open_flir(harvester: Harvester, serial_num: str = None):
-    if serial_num:
-        device = harvester.create({'serial_number': str(serial_num)})
-    else:
-        device = harvester.create()
-    return device
+            # CRITICAL: Clean up the GenTL node so the camera isn't locked on next run
+            self.device.destroy()
+        except Exception as e:
+            cprint(f"Error closing FLIR camera {self.serial_num}: {e}", "red")
