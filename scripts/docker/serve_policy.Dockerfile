@@ -31,8 +31,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=packages/openpi-client/src,target=packages/openpi-client/src \
     GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-install-project --no-dev
 
+RUN apt-get update && apt-get install -y \
+    git git-lfs linux-headers-generic build-essential clang \
+    libusb-1.0-0 \
+    pciutils \
+    iproute2
+
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy transformers_replace files while preserving directory structure
 COPY src/openpi/models_pytorch/transformers_replace/ /tmp/transformers_replace/
 RUN /.venv/bin/python -c "import transformers; print(transformers.__file__)" | xargs dirname | xargs -I{} cp -r /tmp/transformers_replace/* {} && rm -rf /tmp/transformers_replace
 
-CMD /bin/bash -c "uv run scripts/serve_policy.py $SERVER_ARGS"
+# CMD /bin/bash -c "uv run scripts/serve_policy.py $SERVER_ARGS"

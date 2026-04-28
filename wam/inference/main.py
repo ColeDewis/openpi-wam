@@ -58,9 +58,9 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.control_hz = control_hz
+        self.loop_hz = loop_hz
         self.save_action_step_size = max(1, int(round(self.loop_hz / self.control_hz)))
         self.send_interval = self.action_horizon / self.control_hz
-        self.loop_hz = loop_hz
         self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
@@ -88,7 +88,7 @@ class PiZeroTeleop:
         # FLIR setup
         camera_configs = {
             "wrist_image": wrist_cam_serial,
-            "front_image": front_cam_serial,
+            # "front_image": front_cam_serial,
         }
         self.camera_manager = MultiFLIRManager(camera_configs)
         self.camera_manager.start_all()
@@ -177,7 +177,7 @@ class PiZeroTeleop:
             status = state_dict["follower_state"].get("jp") is not None
 
         if self.debug:
-            cprint(f"Robot State: {np.round(state_dict["follower_state"]["jp"], 3)}", "yellow")
+            cprint(f"Robot State: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
 
         return status, state_dict
 

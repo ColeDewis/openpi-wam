@@ -1069,9 +1069,9 @@ _CONFIGS = [
         batch_size=32,
         save_interval=1000,
         keep_period=1000,
-        log_action_samples=True,
+        # log_action_samples=True,
         log_interval=30,
-        log_prompt_samples=True,
+        # log_prompt_samples=True,
     ),
 ]
 

@@ -17,8 +17,8 @@ class MultiFLIRManager:
         """
         cprint("Initializing Harvester System...", "green")
         self.harvester = Harvester()
-        self.harvester.add_file(gentl_path)
-        self.harvester.update()
+        self.harvester.add_cti_file(gentl_path)
+        self.harvester.update_device_info_list()
 
         self.streams = {}
         for name, serial in camera_configs.items():

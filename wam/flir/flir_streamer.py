@@ -51,9 +51,9 @@ class FLIRStream:
             f"Opening FLIR camera {serial_num if serial_num else 'default'}...", "cyan"
         )
         if self.serial_num:
-            self.device = self.harvester.create({"serial_number": str(self.serial_num)})
+            self.device = self.harvester.create_image_acquirer(serial_number=str(self.serial_num))
         else:
-            self.device = self.harvester.create()
+            self.device = self.harvester.create_image_acquirer()
 
         self.latest_image = None
         self.running = False
@@ -62,14 +62,14 @@ class FLIRStream:
 
     def start(self):
         self.running = True
-        self.device.start()
+        self.device.start_image_acquisition()
         self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
 
     def _update(self):
         while self.running:
             try:
-                with self.device.fetch(timeout=0.5) as buffer:
+                with self.device.fetch_buffer(timeout=0.5) as buffer:
                     if len(buffer.payload.components) == 0:
                         continue
 
@@ -98,7 +98,7 @@ class FLIRStream:
         if self.thread is not None:
             self.thread.join(timeout=1.0)
         try:
-            self.device.stop()
+            self.device.stop_image_acquisition()
             # CRITICAL: Clean up the GenTL node so the camera isn't locked on next run
             self.device.destroy()
         except Exception as e:

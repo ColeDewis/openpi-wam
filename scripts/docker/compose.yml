@@ -9,15 +9,23 @@ services:
     init: true
     tty: true
     network_mode: host
+    stdin_open: true
+    privileged: true
+    shm_size: '2gb'
     # Populate configured openpi data home to /openpi_assets inside the container.
     # Populate aws credential inside the container.
     volumes:
       - $PWD:/app
       - ${OPENPI_DATA_HOME:-~/.cache/openpi}:/openpi_assets
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev:/dev
+      - /opt/spinnaker:/opt/spinnaker
     environment:
       - SERVER_ARGS
       - OPENPI_DATA_HOME=/openpi_assets
       - IS_DOCKER=true
+      - DISPLAY=${DISPLAY}
+      - GENICAM_GENTL64_PATH=/opt/spinnaker/lib/spinnaker-gentl
 
     # Comment out this block if not running on a machine with GPUs.
     deploy:
