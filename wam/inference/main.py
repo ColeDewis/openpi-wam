@@ -68,13 +68,13 @@ class PiZeroTeleop:
         # UDP Configuration
         self.remote_ip = remote_ip
         self.send_port = send_port
-        self.recv_port = recv_port
+        self.recv_port = recv_port # not used
         self.DOF = dof
         self.wam_manager = WAMManager(
             self.remote_ip,
             send_port=self.send_port,
-            follower_recv_port=5557,
-            leader_recv_port=5558,
+            follower_recv_port=6554,
+            leader_recv_port=6555,
             dof=self.DOF,
         )
         self.udp_stream = InterpolatingStreamer(
@@ -284,7 +284,7 @@ if __name__ == "__main__":
 
     # Network config
     parser.add_argument("--ip", type=str, default="127.0.0.1", help="Remote UDP IP")
-    parser.add_argument("--send_port", type=int, default=5556, help="UDP Send Port")
+    parser.add_argument("--send_port", type=int, default=6666, help="UDP Send Port")
     parser.add_argument("--recv_port", type=int, default=5557, help="UDP Receive Port")
 
     # Robot config
