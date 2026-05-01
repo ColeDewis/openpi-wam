@@ -42,14 +42,15 @@ class RecorderReceiver:
 
         latest_data = None
 
-        # Keep reading until the buffer throws a BlockingIOError (meaning it's empty)
         while True:
             try:
                 data, _ = self.sock_recv.recvfrom(1024)
                 if len(data) == self.packet_size:
                     latest_data = data
+                else:
+                    print(f"⚠️ Dropping packet! Expected {self.packet_size} bytes, got {len(data)} bytes.")
             except BlockingIOError:
-                break  # Buffer is empty, we have the freshest packet
+                break  # Buffer is empty
             except Exception as e:
                 print(f"Receive Error: {e}")
                 break

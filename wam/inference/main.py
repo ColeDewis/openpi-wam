@@ -88,7 +88,7 @@ class PiZeroTeleop:
         # FLIR setup
         camera_configs = {
             "wrist_image": wrist_cam_serial,
-            # "front_image": front_cam_serial,
+            "front_image": front_cam_serial,
         }
         self.camera_manager = MultiFLIRManager(camera_configs)
         self.camera_manager.start_all()
