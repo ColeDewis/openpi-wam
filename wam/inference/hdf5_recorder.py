@@ -36,6 +36,7 @@ class HDF5Recorder:
 
     def save_episode(self, episode_name, metadata):
         if not self.episode_data:
+            print("No episode data, not saving.")
             return
 
         filepath = os.path.join(self.save_dir, f"{episode_name}.hdf5")

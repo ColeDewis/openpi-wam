@@ -93,6 +93,7 @@ class PiZeroTeleop:
         self.camera_manager = MultiFLIRManager(camera_configs)
         self.camera_manager.start_all()
 
+
         # pi0 Model Configuration
         if self.doing_inference:
             self.policy = OpenPIPolicy(checkpoint_path, model_config, debug=self.debug)
@@ -184,18 +185,21 @@ class PiZeroTeleop:
     def _update_displays(self, front_image, wrist_image):
         debug_front = cv2.cvtColor(front_image, cv2.COLOR_RGB2BGR)
         debug_wrist = cv2.cvtColor(wrist_image, cv2.COLOR_RGB2BGR)
-        cv2.imshow(
-            "Wrist",
-            cv2.resize(
-                debug_wrist, (224 * self.display_scale, 224 * self.display_scale)
-            ),
-        )
-        cv2.imshow(
-            "Front",
-            cv2.resize(
-                debug_front, (224 * self.display_scale, 224 * self.display_scale)
-            ),
-        )
+        try:
+            cv2.imshow(
+                "Wrist",
+                cv2.resize(
+                    debug_wrist, (224 * self.display_scale, 224 * self.display_scale)
+                ),
+            )
+            cv2.imshow(
+                "Front",
+                cv2.resize(
+                    debug_front, (224 * self.display_scale, 224 * self.display_scale)
+                ),
+            )
+        except Exception as e:
+            print(e)
 
         return cv2.waitKey(1) & 0xFF != ord("q")
 
@@ -235,6 +239,10 @@ class PiZeroTeleop:
                 # Read images
                 img_status, image_dict = self._read_images()
                 state_status, state_dict = self._read_state()
+
+                if self.debug:
+                    cv2.waitKey(1)
+
                 if not img_status or not state_status:
                     cprint("State or images not received yet, waiting...", "red")
                     time.sleep(loop_delay)
