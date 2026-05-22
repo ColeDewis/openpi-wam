@@ -2,6 +2,8 @@ import argparse
 import signal
 import time
 from pynput import keyboard
+import struct
+import os
 import cv2
 import numpy as np
 from termcolor import cprint
@@ -103,10 +105,52 @@ class PiZeroTeleop:
         self.episode_counter = 0
         self.recorder = HDF5Recorder(save_dir="./dataset")
 
+        # Set up Joystick
+        self.joy_fd = None
+        self._init_joystick()
+
         self.kb_listener = keyboard.Listener(on_press=self._on_key_press)
         self.kb_listener.start()
         cprint("Initialization complete. Running teleop loop...", "green")
         cprint("Controls: [R] Start/Stop | [S] Save | [D] Discard", "cyan")
+        cprint("Joystick Controls: [o] Start/Stop/Save  | [x] Discard", "cyan")
+
+    def _init_joystick(self):
+        """Initializes the joystick file descriptor in non-blocking mode."""
+        try:
+            self.joy_fd = os.open("/dev/input/js0", os.O_RDONLY | os.O_NONBLOCK)
+            cprint("[SYSTEM] Successfully opened joystick /dev/input/js0", "green")
+        except OSError:
+            cprint("[SYSTEM] Could not open joystick /dev/input/js0. Continuing without joystick.", "yellow")
+
+    def _poll_joystick(self):
+        """Reads non-blocking events from the joystick."""
+        if self.joy_fd is None:
+            return
+
+        try:
+            while True:
+                event_data = os.read(self.joy_fd, 8)
+                if not event_data:
+                    break
+
+                time_msec, value, ev_type, number = struct.unpack('IhBB', event_data)
+
+                # Remove the init event flag (0x80)
+                ev_type &= ~0x80
+
+                # ev_type == 1 means button event, value == 1 means pressed (down)
+                if ev_type == 0x01 and value == 1:
+                    if number == 1:  # 'o' button
+                        self._handle_start_save_action()
+                    elif number == 0:  # 'x' button
+                        self._handle_discard_action()
+
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            cprint(f"[SYSTEM] Error reading joystick: {e}", "red")
+
 
     def _on_key_press(self, key):
         """Asynchronous callback for keyboard events."""
@@ -114,45 +158,52 @@ class PiZeroTeleop:
             if hasattr(key, "char") and key.char is not None:
                 k = key.char.lower()
 
-                if self.loop_state == "IDLE" and k == "r":
-                    self.loop_state = "RECORDING"
-                    cprint("\n[RECORDER] 🔴 EPISODE STARTED", "red", attrs=["bold"])
-
-                elif self.loop_state == "RECORDING" and k == "r":
-                    self.loop_state = "PENDING"
-                    cprint("\n[RECORDER] ⏸ EPISODE PAUSED", "yellow")
-                    cprint("Press [S] to Save or [D] to Discard.", "cyan")
-
-                elif self.loop_state == "PENDING":
-                    if k == "s":
-                        ep_name = f"episode_{int(time.time())}_{self.episode_counter}"
-                        
-                        # Package the metadata for future you
-                        metadata = {
-                            "loop_hz": self.loop_hz,
-                            "control_hz": self.control_hz,
-                            "action_step_size": self.save_action_step_size,
-                            "action_horizon": self.action_horizon,
-                            "dof": self.DOF
-                        }
-                        
-                        self.recorder.save_episode(ep_name, metadata)
-                        self.episode_counter += 1
-                        self.recording_state = "IDLE"
-                        cprint(
-                            "[RECORDER] Ready for next episode. Press [R] to start.",
-                            "cyan",
-                        )
-                    elif k == "d":
-                        self.recorder.clear()
-                        self.loop_state = "IDLE"
-                        cprint(
-                            "\n[RECORDER] 🗑 Episode discarded. Press [R] to start a new one.",
-                            "red",
-                        )
-
+                if k == "r":
+                    if self.loop_state == "IDLE" or self.loop_state == "RECORDING":
+                        self._handle_start_save_action()
+                elif k == "s":
+                    if self.loop_state == "PENDING":
+                        self._save_episode()
+                elif k == "d":
+                    self._handle_discard_action()
         except Exception:
             pass
+
+    def _handle_start_save_action(self):
+        """Unified logic for 'r' / 's' on keyboard and 'o' on joystick."""
+        if self.loop_state == "IDLE":
+            self.loop_state = "RECORDING"
+            cprint("\n[RECORDER] 🔴 EPISODE STARTED", "red", attrs=["bold"])
+        elif self.loop_state == "RECORDING":
+            self.loop_state = "PENDING"
+            cprint("\n[RECORDER] ⏸ EPISODE PAUSED", "yellow")
+            cprint("Press [S] or 'o' to Save, [D] or 'x' to Discard.", "cyan")
+        elif self.loop_state == "PENDING":
+            self._save_episode()
+
+    def _handle_discard_action(self):
+        """Unified logic for 'd' on keyboard and 'x' on joystick."""
+        if self.loop_state in ["RECORDING", "PENDING"]:
+            self.recorder.clear()
+            self.loop_state = "IDLE"
+            cprint("\n[RECORDER] 🗑 Episode discarded. Press [R] or 'o' to start a new one.", "red")
+
+    def _save_episode(self):
+        """Handles packaging and saving the episode to disk."""
+        ep_name = f"episode_{int(time.time())}_{self.episode_counter}"
+        
+        metadata = {
+            "loop_hz": self.loop_hz,
+            "control_hz": self.control_hz,
+            "action_step_size": self.save_action_step_size,
+            "action_horizon": self.action_horizon,
+            "dof": self.DOF
+        }
+        
+        self.recorder.save_episode(ep_name, metadata)
+        self.episode_counter += 1
+        self.loop_state = "IDLE"
+        cprint("[RECORDER] Ready for next episode. Press [R] or 'o' to start.", "cyan")
 
     def _read_images(self):
         status, raw_frames = self.camera_manager.read_all()
@@ -208,6 +259,11 @@ class PiZeroTeleop:
         self.udp_stream.running = False
         self.camera_manager.stop_all()
         self.udp_stream.stop()
+        if self.joy_fd is not None:
+            try:
+                os.close(self.joy_fd)
+            except Exception:
+                pass
         try:
             # Explicitly target the named windows
             cv2.destroyWindow("Wrist")
@@ -216,7 +272,6 @@ class PiZeroTeleop:
         except Exception:
             pass
         time.sleep(2)
-        import os
 
         os._exit(0)
 
@@ -235,6 +290,8 @@ class PiZeroTeleop:
             loop_delay = 1 / self.loop_hz
             while self.system_running:
                 loop_start_time = time.time()
+
+                self._poll_joystick()
 
                 # Read images
                 img_status, image_dict = self._read_images()

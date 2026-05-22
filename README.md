@@ -1,3 +1,7 @@
+# extra notes
+if not using cc install with ```uv pip install -e ".[recording]"```
+
+
 # openpi
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
