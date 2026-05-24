@@ -805,7 +805,7 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
             # repo_id="physical-intelligence/libero",
-            repo_id="/home/serg/serg/openpi-wam/wam_teleop_dataset",
+            repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
