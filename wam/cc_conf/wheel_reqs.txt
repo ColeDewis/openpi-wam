@@ -53,7 +53,7 @@ google-crc32c==1.8.0
 google-resumable-media==2.8.2
 googleapis-common-protos==1.74.0
 grpc-google-iam-v1==0.14.4
-grpcio==1.76.0
+grpcio==1.51.1
 grpcio-status==1.76.0
 gymnasium==0.29.1
 h11==0.16.0
