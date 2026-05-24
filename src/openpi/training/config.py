@@ -801,11 +801,11 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
-        name="pi05_libero",
+        name="haptic_wam",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
             # repo_id="physical-intelligence/libero",
-            repo_id="wxat333/wam_test",
+            repo_id="wxat333/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),

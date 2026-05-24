@@ -1,7 +1,80 @@
 [
   {
-    "start": 0,
-    "end": 6694,
-    "task_name": "do something"
+    "file": "episode_1779495628_0.hdf5",
+    "task_names": [
+      "touch green toy"
+    ]
+  },
+  {
+    "file": "episode_1779495854_2.hdf5",
+    "task_names": [
+      "touch to the left of the green toy"
+    ]
+  },
+  {
+    "file": "episode_1779495959_5.hdf5",
+    "task_names": [
+      "approach the green toy"
+    ]
+  },
+  {
+    "file": "episode_1779496114_8.hdf5",
+    "task_names": [
+      "pickup the green toy and place it on the right"
+    ]
+  },
+  {
+    "file": "episode_1779496179_11.hdf5",
+    "task_names": [
+      "approach green toy, open gripper then close the gripper"
+    ]
+  },
+  {
+    "file": "episode_1779495770_0.hdf5",
+    "task_names": [
+      "approach green toy from left and touch"
+    ]
+  },
+  {
+    "file": "episode_1779495897_3.hdf5",
+    "task_names": [
+      "touch to the right of the green toy"
+    ]
+  },
+  {
+    "file": "episode_1779496035_6.hdf5",
+    "task_names": [
+      "touch to the far right of the green toy"
+    ]
+  },
+  {
+    "file": "episode_1779496141_9.hdf5",
+    "task_names": [
+      "open and close gripper"
+    ]
+  },
+  {
+    "file": "episode_1779495826_1.hdf5",
+    "task_names": [
+      "approach green toy from left and touch"
+    ]
+  },
+  {
+    "file": "episode_1779495929_4.hdf5",
+    "task_names": [
+      "touch in front of the green toy"
+    ]
+  },
+  {
+    "file": "episode_1779496062_7.hdf5",
+    "task_names": [
+      "pick and lift up green toy"
+    ]
+  },
+  {
+    "file": "episode_1779496160_10.hdf5",
+    "task_names": [
+      "extend to the front of the workspace"
+    ]
   }
 ]
