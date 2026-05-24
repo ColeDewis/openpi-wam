@@ -17,15 +17,17 @@ module load opencv/4.11.0
 module load mujoco/3.3.0
 module load gcc arrow/23.0.1
 
+export OPENPI_REPO=/home/serg/serg/openpi-wam
+
 echo "move venv"
-cp $path/venv311.tar $SLURM_TMPDIR/
+cp $OPENPI_REPO/venv311.tar $SLURM_TMPDIR/
 cd $SLURM_TMPDIR
 tar -xf venv311.tar
 
 source .venv/bin/activate
 
 echo "move data"
-cp $path/hf_dataset.tar $SLURM_TMPDIR/
+cp $OPENPI_REPO/hf_dataset.tar $SLURM_TMPDIR/
 mkdir -p $SLURM_TMPDIR/huggingface
 tar -xf hf_dataset.tar -C $SLURM_TMPDIR/huggingface
 
@@ -34,4 +36,4 @@ export HF_DATASETS_CACHE=$SLURM_TMPDIR/huggingface/datasets
 export HF_DATASETS_OFFLINE=1
 
 echo "starting"
-python3 $path/scripts/train.py haptic_wam --exp-name=haptic_wam_test --overwrite
+python3 $OPENPI_REPO/scripts/train.py haptic_wam --exp-name=haptic_wam_test --overwrite
