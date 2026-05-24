@@ -1,4 +1,5 @@
 # this script might not works first try. you might have to manually copy paste sections of the code until you install with 0 errors
+module purge
 module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9.5.29    

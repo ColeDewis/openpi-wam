@@ -25,10 +25,10 @@ module list 2>&1
 export OPENPI_REPO=/home/serg/serg/openpi-wam
 
 echo "move venv"
-# cp $OPENPI_REPO/venv311.tar $SLURM_TMPDIR/
+cp $OPENPI_REPO/venv311.tar $SLURM_TMPDIR/
 cd $SLURM_TMPDIR
-# tar -xf venv311.tar
-#
+tar -xf venv311.tar
+
 # source .venv/bin/activate
 source $OPENPI_REPO/.venv/bin/activate
 
