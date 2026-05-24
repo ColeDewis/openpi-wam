@@ -8,7 +8,6 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --output=%x-%j.out
 
-module purge
 module load python/3.11
 module load cuda/12.2
 module load cudnn/8.9.5.29
@@ -20,11 +19,12 @@ module load gcc arrow/23.0.1
 export OPENPI_REPO=/home/serg/serg/openpi-wam
 
 echo "move venv"
-cp $OPENPI_REPO/venv311.tar $SLURM_TMPDIR/
+# cp $OPENPI_REPO/venv311.tar $SLURM_TMPDIR/
 cd $SLURM_TMPDIR
-tar -xf venv311.tar
-
-source .venv/bin/activate
+# tar -xf venv311.tar
+#
+# source .venv/bin/activate
+source $OPENPI_REPO/.venv/bin/activate
 
 echo "move data"
 cp $OPENPI_REPO/hf_dataset.tar $SLURM_TMPDIR/
