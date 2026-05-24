@@ -806,7 +806,7 @@ _CONFIGS = [
         data=LeRobotLiberoDataConfig(
             # repo_id="physical-intelligence/libero",
             repo_id="wxat333/wam_teleop_dataset",
-            base_config=DataConfig(prompt_from_task=True),
+            base_config=DataConfig(prompt_from_task=True, asset_id="assets/haptic_wam/"),
             extra_delta_transform=False,
         ),
         wandb_enabled=False,
