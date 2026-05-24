@@ -1,6 +1,12 @@
 # extra notes
 if not using cc install with ```uv pip install -e ".[recording]"```
 
+# running in cc
+```
+python3 scripts/compute_norm_stats.py --config-name haptic_wam
+HF_DATASETS_OFFLINE=1 python3 scripts/train.py haptic_wam --exp-name=haptic_wam_test --overwrite
+
+```
 
 # openpi
 
