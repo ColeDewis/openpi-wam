@@ -19,6 +19,9 @@ module load opencv/4.11.0
 module load mujoco/3.3.0
 module load gcc arrow/23.0.1
 
+echo "____"
+module list 2>&1
+
 export OPENPI_REPO=/home/serg/serg/openpi-wam
 
 echo "move venv"
@@ -37,6 +40,9 @@ tar -xf hf_dataset.tar -C $SLURM_TMPDIR/huggingface
 export HF_HOME=$SLURM_TMPDIR/huggingface
 export HF_DATASETS_CACHE=$SLURM_TMPDIR/huggingface/datasets
 export HF_DATASETS_OFFLINE=1
+
+echo "____"
+module list 2>&1
 
 echo "starting"
 python3 $OPENPI_REPO/scripts/train.py haptic_wam --exp-name=haptic_wam_test --overwrite
