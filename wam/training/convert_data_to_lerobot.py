@@ -14,7 +14,8 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 def main(
     dataset_dir: str,
     json_path: str = "episode_splits.json",
-    save_name: str = "wxat333/wam_teleop_dataset"
+    save_name: str = "wxat333/wam_teleop_dataset",
+    output_dir: str = "./wam_teleop_dataset"
 ):
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"Missing JSON file: {json_path}")
@@ -22,12 +23,13 @@ def main(
     with open(json_path, 'r') as f:
         splits = json.load(f)
 
-    output_path = HF_LEROBOT_HOME / save_name
+    output_path = Path(output_dir)
     if output_path.exists():
         shutil.rmtree(output_path)
 
     dataset = LeRobotDataset.create(
         repo_id=save_name,
+        root=output_path,
         robot_type="wam",
         fps=10, 
         features={

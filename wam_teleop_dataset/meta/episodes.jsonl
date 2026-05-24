@@ -1,0 +1,13 @@
+{"episode_index": 0, "tasks": ["touch green toy"], "length": 411}
+{"episode_index": 1, "tasks": ["touch to the left of the green toy"], "length": 502}
+{"episode_index": 2, "tasks": ["approach the green toy"], "length": 489}
+{"episode_index": 3, "tasks": ["pickup the green toy and place it on the right"], "length": 552}
+{"episode_index": 4, "tasks": ["approach green toy, open gripper then close the gripper"], "length": 296}
+{"episode_index": 5, "tasks": ["approach green toy from left and touch"], "length": 473}
+{"episode_index": 6, "tasks": ["touch to the right of the green toy"], "length": 714}
+{"episode_index": 7, "tasks": ["touch to the far right of the green toy"], "length": 703}
+{"episode_index": 8, "tasks": ["open and close gripper"], "length": 105}
+{"episode_index": 9, "tasks": ["approach green toy from left and touch"], "length": 693}
+{"episode_index": 10, "tasks": ["touch in front of the green toy"], "length": 379}
+{"episode_index": 11, "tasks": ["pick and lift up green toy"], "length": 395}
+{"episode_index": 12, "tasks": ["extend to the front of the workspace"], "length": 217}
