@@ -20,9 +20,9 @@ module load gcc arrow/23.0.1
 echo "move venv"
 cp $path/venv311.tar $SLURM_TMPDIR/
 cd $SLURM_TMPDIR
-tar -xf my_venv.tar
+tar -xf venv311.tar
 
-source path/to/your/venv/bin/activate
+source .venv/bin/activate
 
 echo "move data"
 cp $path/hf_dataset.tar $SLURM_TMPDIR/
