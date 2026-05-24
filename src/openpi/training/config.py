@@ -810,7 +810,7 @@ _CONFIGS = [
             extra_delta_transform=False,
         ),
         wandb_enabled=False,
-        batch_size=256,
+        batch_size=16,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=5e-5,
