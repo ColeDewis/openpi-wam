@@ -7,6 +7,10 @@ python3 scripts/compute_norm_stats.py --config-name haptic_wam
 HF_DATASETS_OFFLINE=1 python3 scripts/train.py haptic_wam --exp-name=haptic_wam_test --overwrite
 
 ```
+for interactive do
+```bash
+salloc --time=1:30:0 --ntasks=8 --gres=gpu:h100:1 --mem=16G --nodes=1
+```
 
 # openpi
 
