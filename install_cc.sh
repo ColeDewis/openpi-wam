@@ -11,9 +11,6 @@ module load gcc arrow/23.0.1
 virtualenv --no-download .venv
 source .venv/bin/activate
 
-pip install --no-index -r wam/cc_conf/wheel_reqs.txt
-pip install -r wam/cc_conf/pypi_reqs.txt
-
 git clone https://github.com/kvablack/dlimp.git
 cd dlimp
 git checkout ad72ce3a9b414db2185bc0b38461d4101a65477a
@@ -28,6 +25,9 @@ sed -i '/rerun-sdk/d' pyproject.toml
 sed -i 's/"opencv-python",//g' pyproject.toml
 pip install -e .
 cd ..
+
+pip install --no-index -r wam/cc_conf/wheel_reqs.txt
+pip install -r wam/cc_conf/pypi_reqs.txt
 
 # you also need to import re in /home/<USER>/.local/lib/python3.11/site-packages/jaxtyping/__init__.py
 sed -i 's|jax\[cuda12\]==0.5.3|jax[cuda12]>=0.5.1|g' pyproject.toml
