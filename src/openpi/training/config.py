@@ -802,6 +802,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="haptic_wam",
+        save_interval=1000,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         assets_base_dir="/home/serg/serg/openpi-wam/assets/",
         checkpoint_base_dir="/home/serg/serg/openpi-wam/checkpoints/",

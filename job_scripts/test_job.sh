@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=test_wam
-#SBATCH --time=00:30:00
+#SBATCH --time=10:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:h100:1
 #SBATCH --output=%x-%j.out
 
