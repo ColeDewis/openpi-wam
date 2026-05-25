@@ -18,12 +18,12 @@ module load mujoco/3.3.0
 module load gcc
 module load arrow/23.0.1
 
-export OPENPI_REPO=/home/serg/serg/openpi-wam
+export OPENPI_REPO=/home/serg/projects/openpi-wam
 
 echo "move venv"
 cd $SLURM_TMPDIR
 
-source $OPENPI_REPO/.venv_cc/bin/activate
+source $OPENPI_REPO/.venv/bin/activate
 
 echo "move data"
 cp $OPENPI_REPO/hf_dataset.tar $SLURM_TMPDIR/
