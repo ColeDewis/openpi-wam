@@ -33,6 +33,7 @@ tar -xf hf_dataset.tar -C $SLURM_TMPDIR/huggingface
 export HF_HOME=$SLURM_TMPDIR/huggingface
 export HF_DATASETS_CACHE=$SLURM_TMPDIR/huggingface/datasets
 export HF_DATASETS_OFFLINE=1
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
 echo "starting"
 python3 $OPENPI_REPO/scripts/train.py haptic_wam --exp-name=haptic_wam_test --overwrite
