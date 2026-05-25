@@ -11,6 +11,8 @@ module load gcc arrow/23.0.1
 virtualenv --no-download .venv
 source .venv/bin/activate
 
+export PIP_ONLY_BINARY="mujoco,polars,polars-runtime-32"
+
 git clone https://github.com/kvablack/dlimp.git
 cd dlimp
 git checkout ad72ce3a9b414db2185bc0b38461d4101a65477a
@@ -26,14 +28,32 @@ sed -i 's/"opencv-python",//g' pyproject.toml
 pip install -e .
 cd ..
 
-pip install --no-index -r wam/cc_conf/wheel_reqs.txt
+# This one below seems we can't win, half the packages want protobuf==5.29.6, other wants this, will have to test further.
+pip install protobuf==4.25.8
+
+pip install --no-index --no-deps -r wam/cc_conf/wheel_reqs.txt
+# fix broken reqs
+pip install --no-index "numpy==1.26.4" "jax==0.5.1" "jaxlib==0.5.1" "torch==2.7.1" "torchvision==0.22.1" "torchcodec==0.7.0"
+
 pip install -r wam/cc_conf/pypi_reqs.txt
 
 # you also need to import re in /home/<USER>/.local/lib/python3.11/site-packages/jaxtyping/__init__.py
 sed -i 's|jax\[cuda12\]==0.5.3|jax[cuda12]>=0.5.1|g' pyproject.toml
 sed -i 's|orbax-checkpoint==0.11.13|orbax-checkpoint==0.11.6|g' pyproject.toml
 sed -i '/harvesters/d' pyproject.toml
-pip install -e
+pip install -e .
 
-# This one below seems we can't win, half the packages want protobuf==5.29.6, other wants this, will have to test further.
-pip install protobuf==4.25.8
+sed -i 's/^import warnings$/import warnings\nimport re/' \
+    .venv/lib/python3.11/site-packages/jaxtyping/__init__.py
+sed -i 's/timestamps = torch.stack(self.hf_dataset\["timestamp"\]).numpy()/timestamps = torch.stack(list(self.hf_dataset["timestamp"])).numpy()/' \
+    lerobot/lerobot/common/datasets/lerobot_dataset.py
+sed -i 's/torch.stack(self.hf_dataset\["\(.*\)"\])/torch.stack(list(self.hf_dataset["\1"]))/g' \
+    lerobot/lerobot/common/datasets/lerobot_dataset.py
+sed -i 's/key: torch.stack(self.hf_dataset.select(q_idx)\[key\])/key: torch.stack(list(self.hf_dataset.select(q_idx)[key]))/' \
+    lerobot/lerobot/common/datasets/lerobot_dataset.py
+pip install --no-index pytest
+
+VENV_DIR=$SLURM_TMPDIR/.venv
+sed -i "s|/home/serg/serg/openpi-wam/.venv_cc|$VENV_DIR|g" $VENV_DIR/bin/activate
+sed -i "s|/home/serg/serg/openpi-wam/.venv_cc|$VENV_DIR|g" $VENV_DIR/bin/python* 2>/dev/null || true
+virtualenv --relocatable $VENV_DIR
