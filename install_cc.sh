@@ -53,7 +53,3 @@ sed -i 's/key: torch.stack(self.hf_dataset.select(q_idx)\[key\])/key: torch.stac
     lerobot/lerobot/common/datasets/lerobot_dataset.py
 pip install --no-index pytest
 
-VENV_DIR=$SLURM_TMPDIR/.venv
-sed -i "s|/home/serg/serg/openpi-wam/.venv_cc|$VENV_DIR|g" $VENV_DIR/bin/activate
-sed -i "s|/home/serg/serg/openpi-wam/.venv_cc|$VENV_DIR|g" $VENV_DIR/bin/python* 2>/dev/null || true
-virtualenv --relocatable $VENV_DIR

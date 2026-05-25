@@ -23,7 +23,7 @@ export OPENPI_REPO=/home/serg/serg/openpi-wam
 echo "move venv"
 cd $SLURM_TMPDIR
 
-source $OPENPI_REPO/.venv/bin/activate
+source $OPENPI_REPO/.venv_cc/bin/activate
 
 echo "move data"
 cp $OPENPI_REPO/hf_dataset.tar $SLURM_TMPDIR/
