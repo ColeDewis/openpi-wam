@@ -802,10 +802,11 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="haptic_wam",
+        resume=True,
         save_interval=5000,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         assets_base_dir="/home/serg/projects/openpi-wam/assets/",
-        checkpoint_base_dir="/home/serg/projects/openpi-wam/checkpoints/",
+        checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
         data=LeRobotLiberoDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
