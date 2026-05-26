@@ -98,7 +98,7 @@ class PiZeroTeleop:
 
         # pi0 Model Configuration
         if self.doing_inference:
-            self.policy = OpenPIPolicy(checkpoint_path, model_config, debug=self.debug)
+            self.policy = OpenPIPolicy(checkpoint_path, model_config, "libero", debug=self.debug, dof=self.DOF)
 
         # Set up recorder
         self.loop_state = "IDLE"  # States: IDLE, RECORDING, PENDING
@@ -237,18 +237,19 @@ class PiZeroTeleop:
         debug_front = cv2.cvtColor(front_image, cv2.COLOR_RGB2BGR)
         debug_wrist = cv2.cvtColor(wrist_image, cv2.COLOR_RGB2BGR)
         try:
-            cv2.imshow(
-                "Wrist",
-                cv2.resize(
-                    debug_wrist, (224 * self.display_scale, 224 * self.display_scale)
-                ),
-            )
-            cv2.imshow(
-                "Front",
-                cv2.resize(
-                    debug_front, (224 * self.display_scale, 224 * self.display_scale)
-                ),
-            )
+            pass
+            # cv2.imshow(
+            #     "Wrist",
+            #     cv2.resize(
+            #         debug_wrist, (224 * self.display_scale, 224 * self.display_scale)
+            #     ),
+            # )
+            # cv2.imshow(
+            #     "Front",
+            #     cv2.resize(
+            #         debug_front, (224 * self.display_scale, 224 * self.display_scale)
+            #     ),
+            # )
         except Exception as e:
             print(e)
 
@@ -324,7 +325,6 @@ class PiZeroTeleop:
                 if (loop_start_time - self.last_send_time) >= self.send_interval:
                     if self.doing_inference and self.loop_state == "RECORDING":
                         action_chunk = self.policy.infer(obs)
-                        print(f"inferece: {action_chunk}")
                         self.udp_stream.update_chunk(action_chunk)
 
                     self.last_send_time = loop_start_time
@@ -374,7 +374,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam",
+        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam/haptic_wam_test/25000/",
         help="Path to model checkpoint",
     )
     parser.add_argument(
