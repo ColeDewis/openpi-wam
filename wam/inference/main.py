@@ -324,6 +324,7 @@ class PiZeroTeleop:
                 if (loop_start_time - self.last_send_time) >= self.send_interval:
                     if self.doing_inference and self.loop_state == "RECORDING":
                         action_chunk = self.policy.infer(obs)
+                        print(f"inferece: {action_chunk}")
                         self.udp_stream.update_chunk(action_chunk)
 
                     self.last_send_time = loop_start_time
@@ -373,15 +374,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="gs://openpi-assets/checkpoints/pi05_base",
+        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam",
         help="Path to model checkpoint",
     )
     parser.add_argument(
-        "--config", type=str, default="pi05_droid", help="Policy config name"
+        "--config", type=str, default="haptic_wam", help="Policy config name. see config.py"
     )
 
     # System config
-    parser.add_argument(
+    parser.add_argument( # does not really work
         "--debug",
         action="store_true",
         help="Display OpenCV windows and extra print statements",

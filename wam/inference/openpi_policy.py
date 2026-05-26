@@ -25,17 +25,11 @@ class OpenPIPolicy:
         self.checkpoint_path = checkpoint_path
         self.config = _config.get_config(model_config)
         wam_assets = _config.AssetsConfig(
-            assets_dir="/home/coled/openpi/wam/config", asset_id="wam"
+            assets_dir="/home/serg/projects/openpi-wam/assets/", asset_id="haptic_wam"
         )
         new_data_cfg = dataclasses.replace(self.config.data, assets=wam_assets)
         self.config = dataclasses.replace(self.config, data=new_data_cfg)
         checkpoint_dir = download.maybe_download(self.checkpoint_path)
-
-        # openpi requires file to be present in the assets directory, so copy it there
-        local_norm_path = Path("/home/coled/openpi/wam/config/wam/norm_stats.json")
-        cached_assets_dir = Path(checkpoint_dir) / "assets" / "wam"
-        cached_assets_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(local_norm_path, cached_assets_dir / "norm_stats.json")
 
         # Create a trained policy
         self.policy = policy_config.create_trained_policy(self.config, checkpoint_dir)
@@ -63,7 +57,7 @@ class OpenPIPolicy:
             "observation/gripper_position": np.zeros(
                 1, dtype=np.float32
             ),  # TODO figure out gripper stuff
-            "prompt": "touch the red cup",
+            "prompt": "touch the green toy",
         }
 
         action_chunk = self.policy.infer(example)["actions"]
