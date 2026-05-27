@@ -230,6 +230,7 @@ class PiZeroTeleop:
 
         if self.debug:
             cprint(f"Robot State: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
+            cprint(f"Robot State: {np.round(state_dict['follower_state']['gripper'], 3)}", "yellow")
 
         return status, state_dict
 

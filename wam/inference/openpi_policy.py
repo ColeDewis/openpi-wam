@@ -81,7 +81,7 @@ class OpenPIPolicy:
             example = {
                 "observation/exterior_image_1_left": front_image,
                 "observation/wrist_image_left": wrist_image,
-                "observation/joint_position": robot_state,
+                "observation/joint_position": robot_state["jp"],
                 "observation/gripper_position": np.zeros(
                     1, dtype=np.float32
                 ),  # TODO figure out gripper stuff
@@ -91,16 +91,16 @@ class OpenPIPolicy:
             example = {
                 "observation/image": front_image,
                 "observation/wrist_image": wrist_image,
-                "observation/state": ( np.concatenate([robot_state, np.zeros(1)])),
+                "observation/state": ( np.concatenate([robot_state["jp"], [robot_state["gripper"]]])),
+                "observation/gripper_position": np.zeros(
+                    1, dtype=np.float32
+                ),  # TODO figure out gripper stuff
                 "prompt": "touch the gren toy",
             }
         else:
             raise Exception(f"invalid cfg_type {self.cfg_type}")
 
         action_chunk = self.policy.infer(example)["actions"]
-
-        # add joints to convert to absolute
-        action_chunk = action_chunk
 
         # clip by joint limits
         action_chunk[:, :7] = np.clip(
@@ -112,14 +112,13 @@ class OpenPIPolicy:
     def infer(self, obs):
         front_image = obs["front_image"]
         wrist_image = obs["wrist_image"]
-        jp_state = obs["follower_state"]["jp"]
+        robot_state = obs["follower_state"]
 
-        action_chunk = self._model_inference(front_image, wrist_image, jp_state)
+        action_chunk = self._model_inference(front_image, wrist_image, robot_state)
 
         if self.debug:
             cprint("--- New chunk ---", "blue")
             for act in action_chunk:
-                act = act[: self.DOF]
                 cprint(f"Action from chunk: {np.round(act, 3)}", "cyan")
 
         return action_chunk
