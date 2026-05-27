@@ -1,7 +1,6 @@
 # python -m wam.training.pull_lerobot
 import shutil
 import tarfile
-import tyro
 from pathlib import Path
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
@@ -29,4 +28,4 @@ def main(
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    main()
