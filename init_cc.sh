@@ -5,3 +5,5 @@ module load cmake/3.31.0
 module load opencv/4.11.0
 module load mujoco/3.3.0 
 module load gcc arrow/23.0.1
+
+source /home/serg/projects/openpi-wam/.venv
