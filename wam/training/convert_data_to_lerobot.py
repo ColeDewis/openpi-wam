@@ -14,8 +14,8 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 def main(
     dataset_dir: str,
     json_path: str = "episode_splits.json",
-    save_name: str = "wxat333/wam_teleop_dataset",
-    output_dir: str = "./wam_teleop_dataset"
+    save_name: str = "Breakdancingbear/wam_teleop_dataset",
+    overwrite: bool = False,
 ):
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"Missing JSON file: {json_path}")
@@ -23,13 +23,22 @@ def main(
     with open(json_path, 'r') as f:
         splits = json.load(f)
 
-    output_path = Path(output_dir)
-    if output_path.exists():
-        shutil.rmtree(output_path)
+    hf_cache_path = HF_LEROBOT_HOME / Path(save_name)
+    if hf_cache_path.exists():
+        if overwrite:
+            print(f"Overwriting existing cached dataset at {hf_cache_path}")
+            shutil.rmtree(hf_cache_path)
+        else:
+            response = input(f"Cached dataset exists at {hf_cache_path}. Overwrite? [y/N]: ")
+            if response.strip().lower() == 'y':
+                shutil.rmtree(hf_cache_path)
+            else:
+                print("Aborting.")
+                return
 
     dataset = LeRobotDataset.create(
         repo_id=save_name,
-        root=output_path,
+        # root=output_path,
         robot_type="wam",
         fps=10, 
         features={
@@ -74,6 +83,15 @@ def main(
                 })
             
             dataset.save_episode()
+
+    print(f"Pushing to HuggingFace Hub as {save_name} ...")
+    # make sure to hf auth login
+    dataset.push_to_hub(
+        repo_id=save_name,
+        private=False,
+    )
+    print(f"https://huggingface.co/datasets/{save_name}")
+
 
 if __name__ == "__main__":
     tyro.cli(main)
