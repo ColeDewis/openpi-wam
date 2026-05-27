@@ -84,7 +84,7 @@ class OpenPIPolicy:
                 "observation/joint_position": robot_state["jp"],
                 "observation/gripper_position": np.zeros(
                     1, dtype=np.float32
-                ),  # TODO figure out gripper stuff
+                ),
                 "prompt": "touch the green toy",
             }
         elif self.cfg_type == "libero":
@@ -94,13 +94,15 @@ class OpenPIPolicy:
                 "observation/state": ( np.concatenate([robot_state["jp"], [robot_state["gripper"]]])),
                 "observation/gripper_position": np.zeros(
                     1, dtype=np.float32
-                ),  # TODO figure out gripper stuff
-                "prompt": "touch the gren toy",
+                ),
+                "prompt": "touch the green toy",
             }
         else:
             raise Exception(f"invalid cfg_type {self.cfg_type}")
 
         action_chunk = self.policy.infer(example)["actions"]
+
+        action_chunk[:7] = action_chunk[:self.DOF] + robot_state["jp"]
 
         # clip by joint limits
         action_chunk[:, :7] = np.clip(
