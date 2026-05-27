@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=test_wam
-#SBATCH --time=10:30:00
+#SBATCH --time=07:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
