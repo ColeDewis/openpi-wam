@@ -26,22 +26,6 @@ class TeleopUDPHandler:
 
         print(f"UDP [inference send]: {remote_ip}:{send_port}.")
 
-    def send_data(self, jp, jv, torque):
-        """
-        Sends joint data to the remote target.
-        """
-        if len(jp) != self.dof or len(jv) != self.dof or len(torque) != self.dof:
-            print(f"Error: All inputs must be lists of size {self.dof}")
-            return
-
-        payload = np.concatenate([jp, jv, torque])
-        
-        try:
-            data_bytes = struct.pack(self.fmt, *payload)
-            self.sock_send.sendto(data_bytes, (self.remote_ip, self.send_port))
-        except Exception as e:
-            print(f"Send Error: {e}")
-
     def send_data(self, jp, jv, ext_torque=None, meas_torque=None, gripper=0.0):
         """
         Sends joint data to the remote target.

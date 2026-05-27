@@ -54,23 +54,22 @@ def main(
         with h5py.File(hdf5_file_path, 'r') as src_h5:
             front_imgs = src_h5["front_image"][:]
             wrist_imgs = src_h5["wrist_image"][:]
-            
-            states = np.concatenate([
-                src_h5["follower_state/jp"][:], 
-                np.expand_dims(src_h5["follower_state/gripper"][:], axis=1)
-            ], axis=1).astype(np.float32)
 
-            actions = np.concatenate([
-                src_h5["leader_state/jp"][:], 
-                np.expand_dims(src_h5["leader_state/gripper"][:], axis=1)
-            ], axis=1).astype(np.float32)
+            for i in range(len(front_imgs) - 1):
+                current_jp = src_h5["follower_state/jp"][i]
+                next_jp = src_h5["follower_state/jp"][i + 1]
+                
+                delta_jp = next_jp - current_jp  # delta action
+                gripper = src_h5["follower_state/gripper"][i]  # absolute, as required
+                
+                state = np.concatenate([current_jp, [gripper]]).astype(np.float32)
+                action = np.concatenate([delta_jp, [gripper]]).astype(np.float32)
 
-            for i in range(len(front_imgs)):
                 dataset.add_frame({
                     "image": front_imgs[i],
                     "wrist_image": wrist_imgs[i],
-                    "state": states[i],
-                    "actions": actions[i],
+                    "state": state,
+                    "actions": action,
                     "task": task_prompt, 
                 })
             

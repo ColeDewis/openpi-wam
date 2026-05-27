@@ -804,7 +804,7 @@ _CONFIGS = [
         name="haptic_wam",
         resume=True,
         save_interval=5000,
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        model=pi0_config.Pi0Config(pi05=True, action_dim=8, action_horizon=10, discrete_state_input=False),
         assets_base_dir="/home/serg/projects/openpi-wam/assets/",
         checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
         data=LeRobotLiberoDataConfig(
@@ -815,10 +815,10 @@ _CONFIGS = [
         wandb_enabled=False,
         batch_size=4,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
+            warmup_steps=1_000,
             peak_lr=5e-5,
             decay_steps=1_000_000,
-            decay_lr=5e-5,
+            decay_lr=1e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
