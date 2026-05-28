@@ -92,9 +92,6 @@ class OpenPIPolicy:
                 "observation/image": front_image,
                 "observation/wrist_image": wrist_image,
                 "observation/state": ( np.concatenate([robot_state["jp"], [robot_state["gripper"]]])),
-                "observation/gripper_position": np.zeros(
-                    1, dtype=np.float32
-                ),
                 "prompt": "touch the green toy",
             }
         else:
@@ -102,7 +99,16 @@ class OpenPIPolicy:
 
         action_chunk = self.policy.infer(example)["actions"]
 
-        action_chunk[:7] = action_chunk[:self.DOF] + robot_state["jp"]
+        # action_chunk[:, :7] /= 10
+        action_chunk[:, :7] = np.clip(
+            action_chunk[:, :7], -0.01, 0.01
+        )
+
+        if self.debug:
+            for act in action_chunk:
+                cprint(f"delta: {np.round(act[:self.DOF], 3)}", "cyan")
+
+        action_chunk[:, :7] = action_chunk[:, :self.DOF] + robot_state["jp"]
 
         # clip by joint limits
         action_chunk[:, :7] = np.clip(
@@ -118,9 +124,9 @@ class OpenPIPolicy:
 
         action_chunk = self._model_inference(front_image, wrist_image, robot_state)
 
-        if self.debug:
-            cprint("--- New chunk ---", "blue")
-            for act in action_chunk:
-                cprint(f"Action from chunk: {np.round(act, 3)}", "cyan")
+        # if self.debug:
+        #     cprint("--- New chunk ---", "blue")
+        #     for act in action_chunk:
+        #         cprint(f"Action from chunk: {np.round(act, 3)}", "cyan")
 
         return action_chunk

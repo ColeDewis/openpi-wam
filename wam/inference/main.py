@@ -44,7 +44,7 @@ class PiZeroTeleop:
         front_cam_serial: str,
         checkpoint_path: str,
         model_config: str,
-        control_hz: int = 10,
+        control_hz: int = 30,
         action_horizon: int = 5,
         loop_hz: int = 30,
         display_scale: int = 3,

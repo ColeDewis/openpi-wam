@@ -16,6 +16,7 @@ class InterpolatingStreamer:
     ):
         self.udp_handler = udp_handler
         self.dof = dof
+        self.use_gripper = 0
 
         # Timing parameters
         self.send_interval = send_interval
@@ -25,7 +26,7 @@ class InterpolatingStreamer:
 
         # Thread-safe data structures
         self.waypoint_queue = deque()
-        self.last_sent_joints = np.zeros(dof)
+        self.last_sent_joints = np.zeros(dof + self.use_gripper)
         self.queue_lock = threading.Lock()  # Prevents popping while overwriting
 
         self.running = False
@@ -41,14 +42,14 @@ class InterpolatingStreamer:
         total_interpolated_points = int(self.send_interval * self.stream_hz)
 
         # TODO: handle gripper later...
-        raw_waypoints = raw_action_chunk[: self.action_horizon, : self.dof + 1] # + 1 for the gripper
+        raw_waypoints = raw_action_chunk[: self.action_horizon, : self.dof + self.use_gripper] # + 1 for the gripper
 
         # Stretch the original N waypoints into M high-frequency waypoints
         original_time = np.linspace(0, 1, self.action_horizon)
         new_time = np.linspace(0, 1, total_interpolated_points)
 
-        high_freq_waypoints = np.zeros((total_interpolated_points, self.dof))
-        for j in range(self.dof):
+        high_freq_waypoints = np.zeros((total_interpolated_points, self.dof + self.use_gripper))
+        for j in range(self.dof + self.use_gripper):
             high_freq_waypoints[:, j] = np.interp(
                 new_time, original_time, raw_waypoints[:, j]
             )
@@ -81,7 +82,7 @@ class InterpolatingStreamer:
                     target_joints = self.last_sent_joints
 
             # 2. Send UDP command
-            self.udp_handler.send_data(target_joints[:self.dof], [0] * self.dof, [0] * self.dof, [0] * self.dof, target_joints[self.dof])
+            self.udp_handler.send_data(target_joints[:self.dof], [0] * self.dof, [0] * self.dof, [0] * self.dof, 0 if not self.use_gripper else target_joints[self.dof])
 
             # 3. Sleep to maintain exact stream_hz
             sleep_time = self.stream_dt - (time.time() - loop_start)
