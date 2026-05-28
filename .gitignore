@@ -173,3 +173,5 @@ lerobot/
 dataset/*
 
 *.swp
+
+venv*.tar
