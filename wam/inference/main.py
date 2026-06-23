@@ -44,7 +44,6 @@ class PiZeroTeleop:
         front_cam_serial: str,
         checkpoint_path: str,
         model_config: str,
-        control_hz: int = 30,
         action_horizon: int = 5,
         loop_hz: int = 30,
         display_scale: int = 3,
@@ -59,10 +58,8 @@ class PiZeroTeleop:
         self.offline = offline
         self.display_scale = display_scale
         self.action_horizon = action_horizon
-        self.control_hz = control_hz
         self.loop_hz = loop_hz
-        self.save_action_step_size = max(1, int(round(self.loop_hz / self.control_hz)))
-        self.send_interval = self.action_horizon / self.control_hz
+        self.send_interval = 3 # send interpolated points for 3 seconds
         self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
@@ -193,9 +190,6 @@ class PiZeroTeleop:
         ep_name = f"episode_{int(time.time())}_{self.episode_counter}"
         
         metadata = {
-            "loop_hz": self.loop_hz,
-            "control_hz": self.control_hz,
-            "action_step_size": self.save_action_step_size,
             "action_horizon": self.action_horizon,
             "dof": self.DOF
         }

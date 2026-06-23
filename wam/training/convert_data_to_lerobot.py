@@ -40,7 +40,7 @@ def main(
         repo_id=save_name,
         # root=output_path,
         robot_type="wam",
-        fps=10, 
+        fps=30, 
         features={
             "image": {"dtype": "image", "shape": (224, 224, 3), "names": ["height", "width", "channel"]},
             "wrist_image": {"dtype": "image", "shape": (224, 224, 3), "names": ["height", "width", "channel"]},
