@@ -11,12 +11,12 @@ class InterpolatingStreamer:
         udp_handler: TeleopUDPHandler,
         dof: int,
         send_interval: float,
-        stream_hz: int = 100,
+        stream_hz: int = 500,
         action_horizon: int = 5,
     ):
         self.udp_handler = udp_handler
         self.dof = dof
-        self.use_gripper = 0
+        self.use_gripper = 1
 
         # Timing parameters
         self.send_interval = send_interval
@@ -41,14 +41,13 @@ class InterpolatingStreamer:
 
         total_interpolated_points = int(self.send_interval * self.stream_hz)
 
-        # TODO: handle gripper later...
-        raw_waypoints = raw_action_chunk[: self.action_horizon, : self.dof + self.use_gripper] # + 1 for the gripper
+        raw_waypoints = raw_action_chunk[: self.action_horizon, : 6 + self.use_gripper] # + 1 for the gripper
 
         # Stretch the original N waypoints into M high-frequency waypoints
         original_time = np.linspace(0, 1, self.action_horizon)
         new_time = np.linspace(0, 1, total_interpolated_points)
 
-        high_freq_waypoints = np.zeros((total_interpolated_points, self.dof + self.use_gripper))
+        high_freq_waypoints = np.zeros((total_interpolated_points, 6 + self.use_gripper))
         for j in range(self.dof + self.use_gripper):
             high_freq_waypoints[:, j] = np.interp(
                 new_time, original_time, raw_waypoints[:, j]
@@ -76,13 +75,13 @@ class InterpolatingStreamer:
             # 1. Safely pop from the left of the queue, or hold position if empty
             with self.queue_lock:
                 if len(self.waypoint_queue) > 0:
-                    target_joints = self.waypoint_queue.popleft()
+                    target = self.waypoint_queue.popleft()
                     self.last_sent_joints = target_joints
                 else:
-                    target_joints = self.last_sent_joints
+                    target = self.last_sent_joints
 
             # 2. Send UDP command
-            self.udp_handler.send_data(target_joints[:self.dof], [0] * self.dof, [0] * self.dof, [0] * self.dof, 0 if not self.use_gripper else target_joints[self.dof])
+            self.udp_handler.send_data(None, None, None, None, *target[:3], *target[3:7], -1 if not self.use_gripper else target[self.dof])
 
             # 3. Sleep to maintain exact stream_hz
             sleep_time = self.stream_dt - (time.time() - loop_start)

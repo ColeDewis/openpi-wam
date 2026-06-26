@@ -59,7 +59,7 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.loop_hz = loop_hz
-        self.send_interval = 3 # send interpolated points for 3 seconds
+        self.send_interval = 1 # send interpolated points for 3 seconds
         self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
@@ -80,7 +80,7 @@ class PiZeroTeleop:
             self.wam_manager.follower_sender,
             self.DOF,
             self.send_interval,
-            stream_hz=100,
+            stream_hz=500,
             action_horizon=self.action_horizon,
         )
 
@@ -223,7 +223,7 @@ class PiZeroTeleop:
             status = state_dict["follower_state"].get("jp") is not None
 
         if self.debug:
-            cprint(f"Robot State: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
+            cprint(f"Robot State: {np.round(state_dict['follower_state']['cart_pos'], 3)}", "yellow")
             cprint(f"Robot State: {np.round(state_dict['follower_state']['gripper'], 3)}", "yellow")
 
         return status, state_dict

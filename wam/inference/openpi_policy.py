@@ -14,7 +14,6 @@ from openpi.training import checkpoints as _checkpoints
 WAM_MIN_LIMITS = np.array([-2.5, -1.9, -2.6, -0.7, -4.5, -1.4, -2.9])
 WAM_MAX_LIMITS = np.array([2.5, 1.9, 2.6, 2.9, 1.1, 1.4, 2.9])
 
-
 class OpenPIPolicy:
     def __init__(self, checkpoint_path: str, model_config: str, cfg_type: str = "libero", debug: bool = False, dof: int=7):
         self.debug = debug
@@ -91,7 +90,7 @@ class OpenPIPolicy:
             example = {
                 "observation/image": front_image,
                 "observation/wrist_image": wrist_image,
-                "observation/state": ( np.concatenate([robot_state["jp"], [robot_state["gripper"]]])),
+                "observation/state": ( np.concatenate([robot_state["cart_pos"], robot_state["cart_rot"], [robot_state["gripper"]], [-robot_state["gripper"]]])),
                 "prompt": "touch the green toy",
             }
         else:

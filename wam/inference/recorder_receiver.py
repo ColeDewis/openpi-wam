@@ -14,9 +14,9 @@ class RecorderReceiver:
 
         # Structure format matches C++ RecorderPayload
         # '<'  = Little-endian (Standard memory layout)
-        # 4 arrays of doubles (jp, jv, ext_tau, meas_tau) + 1 double (gripper) = (4 * dof) + 1
+        # 4 arrays of doubles (jp, jv, ext_tau, meas_tau, tool_pos, tool_rot) + 1 double (gripper) = (4 * dof) + 3 + 4 + 1
         # 'Q'  = uint64_t (timestamp)
-        num_doubles = (4 * self.dof) + 1
+        num_doubles = (4 * self.dof) + 3 + 4 + 1
         self.fmt = f"<{num_doubles}dQ"
         self.packet_size = struct.calcsize(self.fmt)
 
@@ -67,14 +67,18 @@ class RecorderReceiver:
         idx_jv = self.dof
         idx_ext_tau = self.dof * 2
         idx_meas_tau = self.dof * 3
-        idx_gripper = self.dof * 4
-        idx_timestamp = self.dof * 4 + 1
+        idx_cart_pos = self.dof * 4
+        idx_cart_rot = self.dof * 4 + 3
+        idx_gripper = self.dof * 4 + 3 + 4
+        idx_timestamp = self.dof * 4 + 3 + 4 + 1
 
         return {
             "jp": list(unpacked[idx_jp:idx_jv]),
             "jv": list(unpacked[idx_jv:idx_ext_tau]),
             "ext_torque": list(unpacked[idx_ext_tau:idx_meas_tau]),
-            "meas_torque": list(unpacked[idx_meas_tau:idx_gripper]),
+            "meas_torque": list(unpacked[idx_meas_tau:idx_cart_pos]),
+            "cart_pos": list(unpacked[idx_cart_pos:idx_cart_rot]),
+            "cart_rot": list(unpacked[idx_cart_rot:idx_gripper]),
             "gripper": unpacked[idx_gripper],
             "timestamp_us": unpacked[idx_timestamp],
         }

@@ -26,21 +26,29 @@ class TeleopUDPHandler:
 
         print(f"UDP [inference send]: {remote_ip}:{send_port}.")
 
-    def send_data(self, jp, jv, ext_torque=None, meas_torque=None, gripper=0.0):
+    def send_data(self, jp=None, jv=None, ext_torque=None, meas_torque=None, cart_pos=None, cart_rot=None, gripper=0.0):
         """
         Sends joint data to the remote target.
         """
+        if jp is None:
+            jp = [0.0] * self.dof
+        if jv is None:
+            jv = [0.0] * self.dof
         if ext_torque is None:
             ext_torque = [0.0] * self.dof
         if meas_torque is None:
             meas_torque = [0.0] * self.dof
+        if cart_pos is None:
+            cart_pos = [0.0] * 3
+        if cart_rot is None:
+            cart_rot = [0.0] * 4 # we will be sending euler but for code simplicity we keep 4 spaces
  
         if any(len(v) != self.dof for v in [jp, jv, ext_torque, meas_torque]):
             print(f"Error: jp, jv, ext_torque, meas_torque must all be length {self.dof}")
             return
  
         now_ns = time.time_ns()
-        payload = list(jp) + list(jv) + list(ext_torque) + list(meas_torque) + [float(gripper)]
+        payload = list(jp) + list(jv) + list(ext_torque) + list(meas_torque) + list(cart_pos) + list(cart_rot) + [float(gripper)]
  
         try:
             data_bytes = struct.pack(self.fmt, *payload, now_ns)
