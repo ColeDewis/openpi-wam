@@ -1,80 +1,86 @@
 [
   {
-    "file": "episode_1779495628_0.hdf5",
+    "file": "episode_1782623884_0.hdf5",
     "task_names": [
-      "touch green toy"
+      "reach to the front of the workspace"
     ]
   },
   {
-    "file": "episode_1779495854_2.hdf5",
+    "file": "episode_1782623916_1.hdf5",
     "task_names": [
-      "touch to the left of the green toy"
+      "reach to the left of the workspace"
     ]
   },
   {
-    "file": "episode_1779495959_5.hdf5",
+    "file": "episode_1782623982_2.hdf5",
     "task_names": [
-      "approach the green toy"
+      "reach to the right of the workspace"
     ]
   },
   {
-    "file": "episode_1779496114_8.hdf5",
+    "file": "episode_1782624031_3.hdf5",
     "task_names": [
-      "pickup the green toy and place it on the right"
+      "bend elbow and look to the right"
     ]
   },
   {
-    "file": "episode_1779496179_11.hdf5",
+    "file": "episode_1782624059_4.hdf5",
     "task_names": [
-      "approach green toy, open gripper then close the gripper"
+      "bend elbow and look to the left"
     ]
   },
   {
-    "file": "episode_1779495770_0.hdf5",
+    "file": "episode_1782624087_5.hdf5",
     "task_names": [
-      "approach green toy from left and touch"
+      "touch the green toy"
     ]
   },
   {
-    "file": "episode_1779495897_3.hdf5",
+    "file": "episode_1782624131_6.hdf5",
     "task_names": [
-      "touch to the right of the green toy"
+      "grab the android stuffy"
     ]
   },
   {
-    "file": "episode_1779496035_6.hdf5",
+    "file": "episode_1782624167_7.hdf5",
     "task_names": [
-      "touch to the far right of the green toy"
+      "pick and place the green thing"
     ]
   },
   {
-    "file": "episode_1779496141_9.hdf5",
+    "file": "episode_1782624227_8.hdf5",
+    "task_names": [
+      "lift the soft object and drop from above"
+    ]
+  },
+  {
+    "file": "episode_1782624528_9.hdf5",
+    "task_names": [
+      "add the apply to the bin"
+    ]
+  },
+  {
+    "file": "episode_1782624586_10.hdf5",
+    "task_names": [
+      "drag the bin to the left side of the robot"
+    ]
+  },
+  {
+    "file": "episode_1782624610_11.hdf5",
     "task_names": [
       "open and close gripper"
     ]
   },
   {
-    "file": "episode_1779495826_1.hdf5",
+    "file": "episode_1782624633_12.hdf5",
     "task_names": [
-      "approach green toy from left and touch"
+      "rotate gripper 90 degrees counter clockwise and open gripper"
     ]
   },
   {
-    "file": "episode_1779495929_4.hdf5",
+    "file": "episode_1782624682_13.hdf5",
     "task_names": [
-      "touch in front of the green toy"
-    ]
-  },
-  {
-    "file": "episode_1779496062_7.hdf5",
-    "task_names": [
-      "pick and lift up green toy"
-    ]
-  },
-  {
-    "file": "episode_1779496160_10.hdf5",
-    "task_names": [
-      "extend to the front of the workspace"
+      "rotate gripper 90 degrees clockwise and open gripper"
     ]
   }
 ]

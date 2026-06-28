@@ -223,8 +223,14 @@ class PiZeroTeleop:
             status = state_dict["follower_state"].get("jp") is not None
 
         if self.debug:
-            cprint(f"Robot State: {np.round(state_dict['follower_state']['cart_pos'], 3)}", "yellow")
-            cprint(f"Robot State: {np.round(state_dict['follower_state']['gripper'], 3)}", "yellow")
+            cprint(f"Robot State [jp]: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
+            cprint(f"Robot State [jv]: {np.round(state_dict['follower_state']['jv'], 3)}", "yellow")
+            cprint(f"Robot State [ext_torque]: {np.round(state_dict['follower_state']['ext_torque'], 3)}", "yellow")
+            cprint(f"Robot State [meas_torque]: {np.round(state_dict['follower_state']['meas_torque'], 3)}", "yellow")
+            cprint(f"Robot State [cart_pos]: {np.round(state_dict['follower_state']['cart_pos'], 3)}", "yellow")
+            cprint(f"Robot State [cart_rot]: {np.round(state_dict['follower_state']['cart_rot'], 3)}", "yellow")
+            cprint(f"Robot State [gripper]: {np.round(state_dict['follower_state']['gripper'], 3)}", "yellow")
+            cprint(f"Robot State [timestamp_ns]: {state_dict['follower_state']['timestamp_ns']}", "yellow")
 
         return status, state_dict
 

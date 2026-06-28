@@ -80,7 +80,7 @@ class RecorderReceiver:
             "cart_pos": list(unpacked[idx_cart_pos:idx_cart_rot]),
             "cart_rot": list(unpacked[idx_cart_rot:idx_gripper]),
             "gripper": unpacked[idx_gripper],
-            "timestamp_us": unpacked[idx_timestamp],
+            "timestamp_ns": unpacked[idx_timestamp],
         }
 
     def close(self):
