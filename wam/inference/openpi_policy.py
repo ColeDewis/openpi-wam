@@ -8,11 +8,81 @@ from openpi.policies import policy_config
 from openpi.shared import download
 from openpi.training import config as _config
 from openpi.training import checkpoints as _checkpoints
+from scipy.spatial.transform import Rotation as R
 
 
 # NOTE a bit lower than actual for safety
 WAM_MIN_LIMITS = np.array([-2.5, -1.9, -2.6, -0.7, -4.5, -1.4, -2.9])
 WAM_MAX_LIMITS = np.array([2.5, 1.9, 2.6, 2.9, 1.1, 1.4, 2.9])
+
+WAM_FORCE_LIMIT  = 10.0
+WAM_TORQUE_LIMIT =  2.0
+ 
+KP_POS = 50.0   # N/m
+KP_ROT =  2.0   # N·m/rad
+ 
+def quat_to_euler(quat):
+    """Quaternion [w, x, y, z] → Euler (roll, pitch, yaw) in radians."""
+    quat_xyzw = np.roll(quat, -1, axis=-1)
+    
+    return R.from_quat(quat_xyzw).as_euler('xyz', degrees=False)
+
+def delta_euler(rot_current, rot_next):
+    """Minimal rotation delta between two quaternions, expressed as Euler xyz."""
+    curr_xyzw = np.roll(rot_current, -1, axis=-1)
+    next_xyzw = np.roll(rot_next, -1, axis=-1)
+    
+    r_delta = R.from_quat(curr_xyzw).inv() * R.from_quat(next_xyzw)
+    return r_delta.as_euler('xyz', degrees=False)
+
+def _euler_delta_to_rot_error(delta_euler_xyz: np.ndarray) -> np.ndarray:
+    """
+    Convert an incremental euler-XYZ delta (radians, EE frame) to a rotation
+    error vector suitable for a proportional torque controller.
+    """
+    q = R.from_euler('xyz', delta_euler_xyz).as_quat()
+    qx, qy, qz, qw = q
+    return 2.0 * np.sign(qw) * np.array([qx, qy, qz])
+ 
+ 
+def _compute_incremental_deltas(action_chunk: np.ndarray) -> np.ndarray:
+    """
+    The policy outputs deltas relative to the *input* pose at every step, i.e.
+    action_chunk[k] = cumulative delta from the initial state.
+ 
+    We convert to step-wise incremental deltas so that the force/torque at
+    each step only reflects the motion needed *from the previous target*,
+    preventing forces from compounding across the chunk.
+ 
+        incremental[0] = action_chunk[0]
+        incremental[k] = action_chunk[k] - action_chunk[k-1],  k > 0
+    """
+    incremental = np.empty_like(action_chunk)
+    incremental[0] = action_chunk[0]
+    incremental[1:] = np.diff(action_chunk, axis=0)
+    # Gripper is not a delta quantity — keep the original policy value each step
+    incremental[:, 6] = action_chunk[:, 6]
+    return incremental
+ 
+ 
+def _incremental_delta_to_wrench(delta: np.ndarray) -> np.ndarray:
+    """
+    Convert a single incremental delta [dx, dy, dz, droll, dpitch, dyaw, gripper]
+    expressed in the EE frame into a wrench [fx, fy, fz, tx, ty, tz, gripper].
+    """
+    delta_pos        = delta[:3]
+    delta_euler_xyz  = delta[3:6]
+    gripper          = delta[6]
+ 
+    force  = KP_POS * delta_pos
+    torque = KP_ROT * _euler_delta_to_rot_error(delta_euler_xyz)
+ 
+    force  = np.clip(force,  -WAM_FORCE_LIMIT,  WAM_FORCE_LIMIT)
+    torque = np.clip(torque, -WAM_TORQUE_LIMIT, WAM_TORQUE_LIMIT)
+ 
+    return np.concatenate([force, torque, [gripper]])
+ 
+
 
 class OpenPIPolicy:
     def __init__(self, checkpoint_path: str, model_config: str, cfg_type: str = "libero", debug: bool = False, dof: int=7):
@@ -81,40 +151,50 @@ class OpenPIPolicy:
                 "observation/exterior_image_1_left": front_image,
                 "observation/wrist_image_left": wrist_image,
                 "observation/joint_position": robot_state["jp"],
-                "observation/gripper_position": np.zeros(
-                    1, dtype=np.float32
-                ),
+                "observation/gripper_position": np.zeros(1, dtype=np.float32),
                 "prompt": "touch the green toy",
             }
         elif self.cfg_type == "libero":
+            euler_rot = quat_to_euler(robot_state["cart_rot"])
             example = {
                 "observation/image": front_image,
                 "observation/wrist_image": wrist_image,
-                "observation/state": ( np.concatenate([robot_state["cart_pos"], robot_state["cart_rot"], [robot_state["gripper"]], [-robot_state["gripper"]]])),
-                "prompt": "touch the green toy",
+                "observation/state": np.concatenate(
+                    [robot_state["cart_pos"], euler_rot, [robot_state["gripper"]], [0]]
+                ),
+                "prompt": "grab the green toy",
             }
         else:
-            raise Exception(f"invalid cfg_type {self.cfg_type}")
-
+            raise Exception(f"Invalid cfg_type {self.cfg_type}")
+ 
+        # Raw action chunk: shape (T, 7)
+        # Columns: [dx, dy, dz, droll, dpitch, dyaw, gripper]
+        # Each row is a cumulative delta from the *input* pose.
         action_chunk = self.policy.infer(example)["actions"]
-
-        # action_chunk[:, :7] /= 10
-        action_chunk[:, :7] = np.clip(
-            action_chunk[:, :7], -0.01, 0.01
+ 
+        incremental = _compute_incremental_deltas(action_chunk)
+ 
+        wrench_chunk = np.stack(
+            [_incremental_delta_to_wrench(inc) for inc in incremental]
         )
-
+ 
         if self.debug:
-            for act in action_chunk:
-                cprint(f"delta: {np.round(act[:self.DOF], 3)}", "cyan")
+            # for i, (inc, w) in enumerate(zip(incremental, wrench_chunk)):
+            cprint(example, "cyan")
+            # for i, (action) in enumerate(action_chunk):
+            #     cprint(
+            #         f"step {i:02d} | "
+            #         f"action: {np.round(action, 4)} | "
+            #         # f"inc_pos: {np.round(action[:3], 4)} | "
+            #         # f"inc_euler: {np.round(inc[3:6], 4)} | "
+            #         # f"force: {np.round(w[:3], 3)} N | "
+            #         # f"torque: {np.round(w[3:6], 3)} N·m | "
+            #         # f"gripper: {w[6]:.3f}",
+            #         "cyan",
+            #     )
+ 
+        return wrench_chunk
 
-        action_chunk[:, :7] = action_chunk[:, :self.DOF] + robot_state["jp"]
-
-        # clip by joint limits
-        action_chunk[:, :7] = np.clip(
-            action_chunk[:, :7], WAM_MIN_LIMITS, WAM_MAX_LIMITS
-        )
-
-        return action_chunk
 
     def infer(self, obs):
         front_image = obs["front_image"]
@@ -122,10 +202,5 @@ class OpenPIPolicy:
         robot_state = obs["follower_state"]
 
         action_chunk = self._model_inference(front_image, wrist_image, robot_state)
-
-        # if self.debug:
-        #     cprint("--- New chunk ---", "blue")
-        #     for act in action_chunk:
-        #         cprint(f"Action from chunk: {np.round(act, 3)}", "cyan")
 
         return action_chunk

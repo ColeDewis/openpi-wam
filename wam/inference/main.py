@@ -59,7 +59,7 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.loop_hz = loop_hz
-        self.send_interval = 1 # send interpolated points for 3 seconds
+        self.send_interval = 0.1 # send interpolated points for 3 seconds
         self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
@@ -223,14 +223,15 @@ class PiZeroTeleop:
             status = state_dict["follower_state"].get("jp") is not None
 
         if self.debug:
-            cprint(f"Robot State [jp]: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
-            cprint(f"Robot State [jv]: {np.round(state_dict['follower_state']['jv'], 3)}", "yellow")
-            cprint(f"Robot State [ext_torque]: {np.round(state_dict['follower_state']['ext_torque'], 3)}", "yellow")
-            cprint(f"Robot State [meas_torque]: {np.round(state_dict['follower_state']['meas_torque'], 3)}", "yellow")
-            cprint(f"Robot State [cart_pos]: {np.round(state_dict['follower_state']['cart_pos'], 3)}", "yellow")
-            cprint(f"Robot State [cart_rot]: {np.round(state_dict['follower_state']['cart_rot'], 3)}", "yellow")
-            cprint(f"Robot State [gripper]: {np.round(state_dict['follower_state']['gripper'], 3)}", "yellow")
-            cprint(f"Robot State [timestamp_ns]: {state_dict['follower_state']['timestamp_ns']}", "yellow")
+            # cprint(f"Robot State [jp]: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
+            # cprint(f"Robot State [jv]: {np.round(state_dict['follower_state']['jv'], 3)}", "yellow")
+            # cprint(f"Robot State [ext_torque]: {np.round(state_dict['follower_state']['ext_torque'], 3)}", "yellow")
+            # cprint(f"Robot State [meas_torque]: {np.round(state_dict['follower_state']['meas_torque'], 3)}", "yellow")
+            # cprint(f"Robot State [cart_pos]: {np.round(state_dict['follower_state']['cart_pos'], 3)}", "yellow")
+            # cprint(f"Robot State [cart_rot]: {np.round(state_dict['follower_state']['cart_rot'], 3)}", "yellow")
+            # cprint(f"Robot State [gripper]: {np.round(state_dict['follower_state']['gripper'], 3)}", "yellow")
+            # cprint(f"Robot State [timestamp_ns]: {state_dict['follower_state']['timestamp_ns']}", "yellow")
+            pass
 
         return status, state_dict
 

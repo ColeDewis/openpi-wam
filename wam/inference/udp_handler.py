@@ -17,7 +17,7 @@ class TeleopUDPHandler:
         
         # jp (DOF doubles) + jv (DOF doubles) + ext_torque (DOF doubles) +
         # meas_torque (DOF doubles) + gripper (1 double) + timestamp (uint64_t)
-        num_doubles = (4 * self.dof) + 1
+        num_doubles = (4 * self.dof) + 3 + 4 + 1
         self.fmt = f"<{num_doubles}dQ"
         self.packet_size = struct.calcsize(self.fmt)
 

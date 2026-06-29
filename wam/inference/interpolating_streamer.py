@@ -48,7 +48,7 @@ class InterpolatingStreamer:
         new_time = np.linspace(0, 1, total_interpolated_points)
 
         high_freq_waypoints = np.zeros((total_interpolated_points, 6 + self.use_gripper))
-        for j in range(self.dof + self.use_gripper):
+        for j in range(self.dof):
             high_freq_waypoints[:, j] = np.interp(
                 new_time, original_time, raw_waypoints[:, j]
             )
@@ -76,12 +76,12 @@ class InterpolatingStreamer:
             with self.queue_lock:
                 if len(self.waypoint_queue) > 0:
                     target = self.waypoint_queue.popleft()
-                    self.last_sent_joints = target_joints
+                    self.last_sent_joints = target
                 else:
                     target = self.last_sent_joints
 
             # 2. Send UDP command
-            self.udp_handler.send_data(None, None, None, None, *target[:3], *target[3:7], -1 if not self.use_gripper else target[self.dof])
+            self.udp_handler.send_data(None, None, None, None, target[:3], target[3:7], -1 if not self.use_gripper else target[6])
 
             # 3. Sleep to maintain exact stream_hz
             sleep_time = self.stream_dt - (time.time() - loop_start)
