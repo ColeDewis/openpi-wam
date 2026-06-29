@@ -107,6 +107,9 @@ def main(config_name: str, max_frames: int | None = None):
             stats[key].update(np.asarray(batch[key]))
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
+    print("\n\n\n\n\nTH#ESE _ARE THE NORMA STATS\n\n\n\n")
+    print(norm_stats)
+    print("\n\n\n\n\n\n\n\n\n")
 
     output_path = config.assets_dirs / data_config.repo_id
     print(f"Writing stats to: {output_path}")
