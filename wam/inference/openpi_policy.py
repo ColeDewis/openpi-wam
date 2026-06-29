@@ -111,6 +111,7 @@ class OpenPIPolicy:
         checkpoint_dir = download.maybe_download(self.checkpoint_path)
 
         norm_stats = _checkpoints.load_norm_stats(wam_assets.assets_dir, wam_assets.asset_id)
+        print(f"trying to find norm_stats in {wam_assets.assets_dir} {wam_assets.asset_id}")
         
         # Create a trained policy
         self.policy = policy_config.create_trained_policy(self.config, checkpoint_dir, norm_stats=norm_stats)
