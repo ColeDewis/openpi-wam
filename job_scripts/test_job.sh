@@ -28,10 +28,9 @@ source $OPENPI_REPO/.venv/bin/activate
 echo "move data"
 cp $OPENPI_REPO/hf_dataset.tar $SLURM_TMPDIR/
 mkdir -p $SLURM_TMPDIR/huggingface
-tar -xf hf_dataset.tar -C $SLURM_TMPDIR/huggingface
+tar -xf hf_dataset.tar -C $SLURM_TMPDIR
 
-export HF_HOME=$SLURM_TMPDIR/huggingface
-export HF_DATASETS_CACHE=$SLURM_TMPDIR/huggingface/datasets
+export HF_LEROBOT_HOME=$SLURM_TMPDIR
 export HF_DATASETS_OFFLINE=1
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
