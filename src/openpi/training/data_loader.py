@@ -150,6 +150,7 @@ def create_torch_dataset(
     )
     print(dataset)
     print(data_config)
+    print(dataset_meta.tasks)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])

@@ -102,9 +102,14 @@ def main(config_name: str, max_frames: int | None = None):
     keys = ["state", "actions"]
     stats = {key: normalize.RunningStats() for key in keys}
 
+    count = 0
     for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
         for key in keys:
+            if key == "actions":
+                print(batch[key])
             stats[key].update(np.asarray(batch[key]))
+
+    print(count)
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
     print("\n\n\n\n\nTH#ESE _ARE THE NORMA STATS\n\n\n\n")
