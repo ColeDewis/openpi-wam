@@ -175,3 +175,6 @@ dataset/*
 *.swp
 
 venv*.tar
+
+Breakdancingbear
+hf_dataset.tar
