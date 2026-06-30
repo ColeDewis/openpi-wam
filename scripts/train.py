@@ -268,6 +268,7 @@ def main(config: _config.TrainConfig):
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
+    # this is where the norm_stats are used
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,

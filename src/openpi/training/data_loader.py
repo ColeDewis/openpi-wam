@@ -137,7 +137,11 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    print("LOADING DATASET\n\n\n\n\n")
+    print(repo_id)
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    print(dataset_meta)
+    print(action_horizon)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
