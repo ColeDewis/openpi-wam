@@ -180,6 +180,9 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             )
         norm_stats = data_config.norm_stats
 
+    print("applying norm stats")
+    print(norm_stats)
+
     return TransformedDataset(
         dataset,
         [

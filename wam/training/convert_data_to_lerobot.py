@@ -145,6 +145,7 @@ def main(
 
                 state  = np.concatenate([cart_pos[i], euler,     [gripper], [0]]).astype(np.float32)
                 action = np.concatenate([delta_pos,   delta_rot, [gripper_action]]).astype(np.float32)
+                print(action)
 
                 episode_frames.append({
                     "image":       front_imgs[i],
@@ -167,10 +168,10 @@ def main(
 
     print(f"Pushing to HuggingFace Hub as {save_name} ...")
     # make sure to hf auth login
-    dataset.push_to_hub(
-        repo_id=save_name,
-        private=False,
-    )
+    # dataset.push_to_hub(
+    #     repo_id=save_name,
+    #     private=False,
+    # )
     print(f"https://huggingface.co/datasets/{save_name}")
 
 
