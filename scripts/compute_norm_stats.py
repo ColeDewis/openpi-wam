@@ -104,6 +104,7 @@ def main(config_name: str, max_frames: int | None = None):
 
     count = 0
     for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
+        count += 1
         for key in keys:
             if key == "actions":
                 print(batch[key])
