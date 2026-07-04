@@ -42,7 +42,7 @@ def inspect_hdf5(file_path):
                             
                             # Flatten it to stringify a clean preview of the first 4 elements
                             flat_data = np.array(first_item).flatten()
-                            preview = flat_data[:4]
+                            preview = flat_data[:10]
                             ellipsis = "..." if len(flat_data) > 4 else ""
                             
                             # Format nicely
