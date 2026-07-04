@@ -1,86 +1,50 @@
 [
   {
-    "file": "episode_1782623884_0.hdf5",
+    "file": "episode_1783191963_0.hdf5",
     "task_names": [
-      "reach to the front of the workspace"
+      "touch the green thing"
     ]
   },
   {
-    "file": "episode_1782623916_1.hdf5",
+    "file": "episode_1783192021_1.hdf5",
     "task_names": [
-      "reach to the left of the workspace"
+      "touch the green thing"
     ]
   },
   {
-    "file": "episode_1782623982_2.hdf5",
+    "file": "episode_1783192042_2.hdf5",
     "task_names": [
-      "reach to the right of the workspace"
+      "touch the green thing"
     ]
   },
   {
-    "file": "episode_1782624031_3.hdf5",
+    "file": "episode_1783192138_3.hdf5",
     "task_names": [
-      "bend elbow and look to the right"
+      "touch the green thing"
     ]
   },
   {
-    "file": "episode_1782624059_4.hdf5",
+    "file": "episode_1783192174_4.hdf5",
     "task_names": [
-      "bend elbow and look to the left"
+      "touch the green thing"
     ]
   },
   {
-    "file": "episode_1782624087_5.hdf5",
+    "file": "episode_1783192219_5.hdf5",
     "task_names": [
-      "touch the green toy"
+      "touch the green thing"
     ]
   },
   {
-    "file": "episode_1782624131_6.hdf5",
+    "file": "episode_1783192240_6.hdf5",
     "task_names": [
-      "grab the android stuffy"
+      "touch the green thing"
     ]
   },
   {
-    "file": "episode_1782624167_7.hdf5",
+    "file": "episode_1783192268_7.hdf5",
     "task_names": [
-      "pick and place the green thing"
-    ]
-  },
-  {
-    "file": "episode_1782624227_8.hdf5",
-    "task_names": [
-      "lift the soft object and drop from above"
-    ]
-  },
-  {
-    "file": "episode_1782624528_9.hdf5",
-    "task_names": [
-      "add the apply to the bin"
-    ]
-  },
-  {
-    "file": "episode_1782624586_10.hdf5",
-    "task_names": [
-      "drag the bin to the left side of the robot"
-    ]
-  },
-  {
-    "file": "episode_1782624610_11.hdf5",
-    "task_names": [
-      "open and close gripper"
-    ]
-  },
-  {
-    "file": "episode_1782624633_12.hdf5",
-    "task_names": [
-      "rotate gripper 90 degrees counter clockwise and open gripper"
-    ]
-  },
-  {
-    "file": "episode_1782624682_13.hdf5",
-    "task_names": [
-      "rotate gripper 90 degrees clockwise and open gripper"
+      "touch the green thing"
     ]
   }
 ]

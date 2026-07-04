@@ -136,14 +136,14 @@ class OpenPIPolicy:
                 "prompt": "touch the green toy",
             }
         elif self.cfg_type == "libero":
-            euler_rot = quat_to_euler(robot_state["cart_rot"])
+            euler_rot = quat_to_euler(robot_state["follower_cart_rot"])
             example = {
                 "observation/image": front_image,
                 "observation/wrist_image": wrist_image,
                 "observation/state": np.concatenate(
-                    [robot_state["cart_pos"], euler_rot, [robot_state["gripper_pos"]], [0]]
+                    [robot_state["follower_cart_pos"], euler_rot, [robot_state["gripper_pos"]], [0]]
                 ),
-                "prompt": "grab the green toy",
+                "prompt": "touch the green thing",
             }
         else:
             raise Exception(f"Invalid cfg_type {self.cfg_type}")
@@ -174,7 +174,7 @@ class OpenPIPolicy:
     def infer(self, obs):
         front_image = obs["front_image"]
         wrist_image = obs["wrist_image"]
-        robot_state = obs["follower_state"]
+        robot_state = obs["low_dim"]
 
         action_chunk = self._model_inference(front_image, wrist_image, robot_state)
 

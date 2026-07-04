@@ -92,12 +92,12 @@ def main(
         task_prompt = split['task_names'][0] if isinstance(split.get('task_names'), list) else split.get('task_name', "")
 
         with h5py.File(hdf5_file_path, 'r') as src_h5:
-            timestamps  = src_h5["timestamp_ns"][:]
+            timestamps  = src_h5["low_dim/timestamp_ns"][:]
             front_imgs  = src_h5["front_image"][:]
             wrist_imgs  = src_h5["wrist_image"][:]
-            cart_pos    = src_h5["cart_pos"][:]
-            cart_rot    = src_h5["cart_rot"][:]
-            gripper_arr = src_h5["gripper_pos"][:]
+            cart_pos    = src_h5["low_dim/follower_cart_pos"][:]
+            cart_rot    = src_h5["low_dim/follower_cart_rot"][:]
+            gripper_arr = src_h5["low_dim/gripper_pos"][:]
 
             t_start = timestamps[0]
             t_end   = timestamps[-1]
@@ -146,7 +146,6 @@ def main(
 
                 state  = np.concatenate([cart_pos[i], euler,     [gripper], [0]]).astype(np.float32)
                 action = np.concatenate([delta_pos,   delta_rot, [gripper_action]]).astype(np.float32)
-                print(action)
 
                 episode_frames.append({
                     "image":       front_imgs[i],
@@ -169,10 +168,10 @@ def main(
 
     print(f"Pushing to HuggingFace Hub as {save_name} ...")
     # make sure to hf auth login
-    # dataset.push_to_hub(
-    #     repo_id=save_name,
-    #     private=False,
-    # )
+    dataset.push_to_hub(
+        repo_id=save_name,
+        private=False,
+    )
     print(f"https://huggingface.co/datasets/{save_name}")
 
 
