@@ -92,12 +92,12 @@ def main(
         task_prompt = split['task_names'][0] if isinstance(split.get('task_names'), list) else split.get('task_name', "")
 
         with h5py.File(hdf5_file_path, 'r') as src_h5:
-            timestamps  = src_h5["follower_state/timestamp_ns"][:]
+            timestamps  = src_h5["timestamp_ns"][:]
             front_imgs  = src_h5["front_image"][:]
             wrist_imgs  = src_h5["wrist_image"][:]
-            cart_pos    = src_h5["follower_state/cart_pos"][:]
-            cart_rot    = src_h5["follower_state/cart_rot"][:]
-            gripper_arr = src_h5["follower_state/gripper"][:]
+            cart_pos    = src_h5["cart_pos"][:]
+            cart_rot    = src_h5["cart_rot"][:]
+            gripper_arr = src_h5["gripper_pos"][:]
 
             t_start = timestamps[0]
             t_end   = timestamps[-1]
@@ -141,7 +141,8 @@ def main(
                 delta_rot  = delta_euler(cart_rot[i], cart_rot[i_next])
                 euler      = quat_to_euler(cart_rot[i])
                 gripper    = gripper_arr[i]
-                gripper_action = -1 if gripper > -0.1 else 1 # assuming gripper close is around 0 and open is around -0.4
+                # NOTE: in libero close is 1 and -1 is open
+                gripper_action = 1 if gripper > -0.1 else -1 # assuming gripper close is around 0 and open is around -0.4
 
                 state  = np.concatenate([cart_pos[i], euler,     [gripper], [0]]).astype(np.float32)
                 action = np.concatenate([delta_pos,   delta_rot, [gripper_action]]).astype(np.float32)

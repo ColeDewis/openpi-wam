@@ -78,10 +78,10 @@ class InterpolatingStreamer:
                     target = self.waypoint_queue.popleft()
                     self.last_sent_joints = target
                 else:
-                    target = self.last_sent_joints
+                    target = [0] * 7
 
             # 2. Send UDP command
-            self.udp_handler.send_data(None, None, None, None, target[:3], target[3:7], -1 if not self.use_gripper else target[6])
+            self.udp_handler.send_data(target[:3], target[3:6], -1 if not self.use_gripper else target[6])
 
             # 3. Sleep to maintain exact stream_hz
             sleep_time = self.stream_dt - (time.time() - loop_start)

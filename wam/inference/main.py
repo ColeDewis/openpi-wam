@@ -10,7 +10,8 @@ from termcolor import cprint
 from wam.inference.openpi_policy import OpenPIPolicy
 from wam.inference.interpolating_streamer import InterpolatingStreamer
 from wam.inference.hdf5_recorder import HDF5Recorder
-from wam.inference.wam_manager import WAMManager
+from wam.inference.udp_handler import TeleopUDPHandler
+from wam.inference.recorder_receiver import RecorderReceiver
 from wam.flir.multi_flir_manager import MultiFLIRManager
 
 np.set_printoptions(precision=4, suppress=True)
@@ -59,7 +60,7 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.loop_hz = loop_hz
-        self.send_interval = 0.1 # send interpolated points for 3 seconds
+        self.send_interval = 1 # send interpolated points for 3 seconds
         self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
@@ -69,15 +70,14 @@ class PiZeroTeleop:
         self.send_port = send_port
         self.recv_port = recv_port # not used
         self.DOF = dof
-        self.wam_manager = WAMManager(
-            self.remote_ip,
-            send_port=self.send_port,
-            follower_recv_port=6554,
-            leader_recv_port=6555,
-            dof=self.DOF,
-        )
+
+        # even though we listen to the follower we actually also get leader data, just dont do anything with it for now
+        # also, leader data is just 0's if we dont start the leader
+        self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
+        self.follower_sender = TeleopUDPHandler(self.remote_ip, self.send_port, DOF=self.DOF)
+
         self.udp_stream = InterpolatingStreamer(
-            self.wam_manager.follower_sender,
+            self.follower_sender,
             self.DOF,
             self.send_interval,
             stream_hz=500,
@@ -216,11 +216,11 @@ class PiZeroTeleop:
     def _read_state(self):
         if self.offline:
             jp_state = np.array([0, 0.2, 1.5, -1.5, 0, 0, 0])
-            state_dict = {"follower_state": {"jp": jp_state}}
+            state_dict = {"follower_jp": jp_state}
             status = True
         else:
-            state_dict = self.wam_manager.get_latest_states()
-            status = state_dict["follower_state"].get("jp") is not None
+            state_dict = self.follower_listener.receive_latest_data()
+            status = state_dict.get("follower_jp") is not None
 
         if self.debug:
             # cprint(f"Robot State [jp]: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
@@ -308,9 +308,7 @@ class PiZeroTeleop:
                     time.sleep(loop_delay)
                     continue
                 obs = image_dict.copy()
-                if state_dict.get("leader_state") is not None:
-                    obs["leader_state"] = state_dict["leader_state"]
-                obs["follower_state"] = state_dict["follower_state"]
+                obs["low_dim"] = state_dict
 
                 # Update display windows if debugging
                 if self.debug and not self._update_displays(
@@ -353,7 +351,7 @@ if __name__ == "__main__":
     # Network config
     parser.add_argument("--ip", type=str, default="127.0.0.1", help="Remote UDP IP")
     parser.add_argument("--send_port", type=int, default=6666, help="UDP Send Port")
-    parser.add_argument("--recv_port", type=int, default=5557, help="UDP Receive Port")
+    parser.add_argument("--recv_port", type=int, default=6554, help="UDP Receive Port")
 
     # Robot config
     parser.add_argument("--dof", type=int, default=7, help="Degrees of Freedom")

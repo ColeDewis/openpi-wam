@@ -1,5 +1,4 @@
 import dataclasses
-import shutil
 from pathlib import Path
 import numpy as np
 from termcolor import cprint
@@ -10,6 +9,7 @@ from openpi.training import config as _config
 from openpi.training import checkpoints as _checkpoints
 from scipy.spatial.transform import Rotation as R
 
+# TODO: only libero works for now
 
 # NOTE a bit lower than actual for safety
 WAM_MIN_LIMITS = np.array([-2.5, -1.9, -2.6, -0.7, -4.5, -1.4, -2.9])
@@ -141,16 +141,14 @@ class OpenPIPolicy:
                 "observation/image": front_image,
                 "observation/wrist_image": wrist_image,
                 "observation/state": np.concatenate(
-                    [robot_state["cart_pos"], euler_rot, [robot_state["gripper"]], [0]]
+                    [robot_state["cart_pos"], euler_rot, [robot_state["gripper_pos"]], [0]]
                 ),
                 "prompt": "grab the green toy",
             }
         else:
             raise Exception(f"Invalid cfg_type {self.cfg_type}")
  
-        # Raw action chunk: shape (T, 7)
-        # Columns: [dx, dy, dz, droll, dpitch, dyaw, gripper]
-        # Each row is a cumulative delta from the *input* pose.
+        # [dx, dy, dz, droll, dpitch, dyaw, gripper]
         action_chunk = self.policy.infer(example)["actions"]
  
         wrench_chunk = np.stack(
