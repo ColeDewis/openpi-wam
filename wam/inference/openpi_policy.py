@@ -18,7 +18,7 @@ WAM_MAX_LIMITS = np.array([2.5, 1.9, 2.6, 2.9, 1.1, 1.4, 2.9])
 WAM_FORCE_LIMIT  = 10
 WAM_TORQUE_LIMIT =  0
  
-KP_POS = 25   # N/m
+KP_POS = 500   # N/m
 KP_ROT = 1   # N·m/rad
  
 def quat_to_euler(quat):
@@ -149,13 +149,16 @@ class OpenPIPolicy:
             raise Exception(f"Invalid cfg_type {self.cfg_type}")
  
         # [dx, dy, dz, droll, dpitch, dyaw, gripper]
-        action_chunk = self.policy.infer(example)["actions"]
+        inference_output = self.policy.infer(example)
+        inf_time = inference_output["policy_timing"]["infer_ms"]
+        action_chunk = inference_output["actions"]
  
         wrench_chunk = np.stack(
             [delta_to_wrench(d) for d in action_chunk]
         )
  
         if self.debug:
+            cprint(inf_time, "blue")
             for i, chunk in enumerate(wrench_chunk):
             # cprint(example, "cyan")
             # for i, (action) in enumerate(action_chunk):

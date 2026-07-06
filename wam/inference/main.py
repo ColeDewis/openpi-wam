@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 from termcolor import cprint
 from wam.inference.openpi_policy import OpenPIPolicy
-from wam.inference.interpolating_streamer import InterpolatingStreamer
 from wam.inference.hdf5_recorder import HDF5Recorder
 from wam.inference.udp_handler import TeleopUDPHandler
 from wam.inference.recorder_receiver import RecorderReceiver
@@ -60,7 +59,7 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.loop_hz = loop_hz
-        self.send_interval = 1 # send interpolated points for 3 seconds
+        self.send_interval = 0.5 # send interpolated points for 3 seconds
         self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
@@ -75,14 +74,6 @@ class PiZeroTeleop:
         # also, leader data is just 0's if we dont start the leader
         self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
         self.follower_sender = TeleopUDPHandler(self.remote_ip, self.send_port, DOF=self.DOF)
-
-        self.udp_stream = InterpolatingStreamer(
-            self.follower_sender,
-            self.DOF,
-            self.send_interval,
-            stream_hz=500,
-            action_horizon=self.action_horizon,
-        )
 
         # FLIR setup
         camera_configs = {
@@ -220,7 +211,7 @@ class PiZeroTeleop:
             status = True
         else:
             state_dict = self.follower_listener.receive_latest_data()
-            status = state_dict.get("follower_jp") is not None
+            status = state_dict is not None
 
         if self.debug:
             # cprint(f"Robot State [jp]: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
@@ -259,9 +250,8 @@ class PiZeroTeleop:
 
     def shutdown(self):
         cprint("Cleaning up streams and windows...", "red")
-        self.udp_stream.running = False
         self.camera_manager.stop_all()
-        self.udp_stream.stop()
+        self.follower_sender.close()
         if self.joy_fd is not None:
             try:
                 os.close(self.joy_fd)
@@ -291,6 +281,7 @@ class PiZeroTeleop:
             signal.signal(signal.SIGINT, force_shutdown)
 
             loop_delay = 1 / self.loop_hz
+            waiting_counter = 0
             while self.system_running:
                 loop_start_time = time.time()
 
@@ -299,6 +290,13 @@ class PiZeroTeleop:
                 # Read images
                 img_status, image_dict = self._read_images()
                 state_status, state_dict = self._read_state()
+
+                if not state_status:
+                    if waiting_counter == 10:
+                        cprint("waiting for messages", "yellow")
+                        waiting_counter = 0
+                    waiting_counter += 1
+                    continue
 
                 if self.debug:
                     cv2.waitKey(1)
@@ -322,12 +320,12 @@ class PiZeroTeleop:
                     self.recorder.add_step(obs)
 
                 # Infer + send to WAM
-                if (loop_start_time - self.last_send_time) >= self.send_interval:
-                    if self.doing_inference and self.loop_state == "RECORDING":
-                        action_chunk = self.policy.infer(obs)
-                        self.udp_stream.update_chunk(action_chunk)
+                # if (loop_start_time - self.last_send_time) >= self.send_interval:
+                if self.doing_inference and self.loop_state == "RECORDING":
+                    action_chunk = self.policy.infer(obs)
+                    self.follower_sender.send_action_chunk(action_chunk)
 
-                    self.last_send_time = loop_start_time
+                    # self.last_send_time = loop_start_time
 
                 # sleep, accounting for the time the loop already took to try and keep the desired frequency
                 elapsed_time = time.time() - loop_start_time
