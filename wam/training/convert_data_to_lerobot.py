@@ -13,33 +13,46 @@ from scipy.spatial.transform import Rotation as R
 from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
-POS_THRESHOLD = 0.01
-ROT_THRESHOLD = 0.1
-GRIP_THRESHOLD = 0.1
+POS_THRESHOLD = 0.0015
+ROT_THRESHOLD = 0.0005
 
 def find_nearest_index(timestamps, target_time):
     """Return index of the timestamp closest to target_time."""
     return int(np.argmin(np.abs(timestamps - target_time)))
 
-def quat_to_euler(quat):
+def quats_to_euler(quats):
     """Quaternion [w, x, y, z] → Euler (roll, pitch, yaw) in radians."""
-    quat_xyzw = np.roll(quat, -1, axis=-1)
+    quats_xyzw = np.roll(quats, -1, axis=-1)
     
-    return R.from_quat(quat_xyzw).as_euler('xyz', degrees=False)
+    euler = R.from_quat(quats_xyzw).as_euler('xyz', degrees=False)  # (N,3)
+    return np.unwrap(euler, axis=0)
 
-def delta_euler(rot_current, rot_next):
-    """Minimal rotation delta between two quaternions, expressed as Euler xyz."""
+
+def delta_rotvec(rot_current, rot_next):
+    """Minimal rotation delta between two quaternions, as an axis-angle (rotation) vector."""
     curr_xyzw = np.roll(rot_current, -1, axis=-1)
     next_xyzw = np.roll(rot_next, -1, axis=-1)
-    
     r_delta = R.from_quat(curr_xyzw).inv() * R.from_quat(next_xyzw)
-    return r_delta.as_euler('xyz', degrees=False)
+    return r_delta.as_rotvec()  # shape (3,), axis * angle_rad
 
-def is_significant(delta_pos, delta_rot, delta_grip):
-    """True if any axis of pos OR rot exceeds its threshold."""
-    return (np.any(np.abs(delta_pos) > POS_THRESHOLD) or
-            np.any(np.abs(delta_rot) > ROT_THRESHOLD) or
-            np.any(np.abs(delta_grip) > GRIP_THRESHOLD))
+
+def is_noop(delta_pos, delta_rot, gripper_action, prev_gripper_action):
+    """
+    port from      https://github.com/openvla/openvla/blob/main/experiments/robot/libero/regenerate_libero_dataset.py   """
+    motion_is_noop = (np.linalg.norm(delta_pos) < POS_THRESHOLD and
+                       np.linalg.norm(delta_rot) < ROT_THRESHOLD)
+ 
+    if prev_gripper_action is None:
+        return motion_is_noop
+ 
+    return motion_is_noop and (gripper_action == prev_gripper_action)
+
+
+def zero_noop_axes(delta_pos, delta_rot):
+    """Zero out individual axes of a delta that don't clear their threshold"""
+    delta_pos = np.where(np.abs(delta_pos) > POS_THRESHOLD, delta_pos, 0.0)
+    delta_rot = np.where(np.abs(delta_rot) > ROT_THRESHOLD, delta_rot, 0.0)
+    return delta_pos, delta_rot
 
 
 def main(
@@ -99,6 +112,8 @@ def main(
             cart_rot    = src_h5["low_dim/follower_cart_rot"][:]
             gripper_arr = src_h5["low_dim/gripper_pos"][:]
 
+            eulers = quats_to_euler(cart_rot)
+
             t_start = timestamps[0]
             t_end   = timestamps[-1]
 
@@ -108,45 +123,34 @@ def main(
             sampled_indices = [find_nearest_index(timestamps, t) for t in target_times]
             sampled_indices = list(dict.fromkeys(sampled_indices))
             n_sampled = len(sampled_indices)
-
-            WINDOW = 10
             episode_frames = []
 
-            total_windows = n_sampled - WINDOW
+            total_steps = max(n_sampled - 1, 0)
             noop_count = 0
+            prev_gripper_action = None
 
-            for w_start in range(n_sampled - WINDOW):
-                window_idxs = sampled_indices[w_start: w_start + WINDOW + 1]
-
-                significant_window = False
-                for k in range(WINDOW):
-                    i      = window_idxs[k]
-                    i_next = window_idxs[k + 1]
-                    dp = cart_pos[i_next] - cart_pos[i]
-                    dr = delta_euler(cart_rot[i], cart_rot[i_next])
-                    dg = gripper_arr[i_next] - gripper_arr[i]
-                    if is_significant(dp, dr, dg):
-                        significant_window = True
-                        break
-
-                # remove noop
-                if not significant_window:
-                    noop_count += 1
-                    continue
-
-                i      = window_idxs[0]
-                i_next = window_idxs[1]
-
-                delta_pos  = cart_pos[i_next] - cart_pos[i]
-                delta_rot  = delta_euler(cart_rot[i], cart_rot[i_next])
-                euler      = quat_to_euler(cart_rot[i])
-                gripper    = gripper_arr[i]
+            for idx in range(n_sampled - 1):
+                i      = sampled_indices[idx]
+                i_next = sampled_indices[idx + 1]
+ 
+                delta_pos = cart_pos[i_next] - cart_pos[i]
+                delta_rot = delta_rotvec(cart_rot[i], cart_rot[i_next])
+ 
+                gripper = gripper_arr[i]
                 # NOTE: in libero close is 1 and -1 is open
                 gripper_action = 1 if gripper > -0.01 else -1 # assuming gripper close is around 0 and open is around -0.04
-
+ 
+                if is_noop(delta_pos, delta_rot, gripper_action, prev_gripper_action):
+                    noop_count += 1
+                    continue
+ 
+                # zero out individual axes of the kept delta that are near zero
+                delta_pos, delta_rot = zero_noop_axes(delta_pos, delta_rot)
+ 
+                euler = eulers[i]
                 state  = np.concatenate([cart_pos[i], euler,     [gripper], [-gripper]]).astype(np.float32)
                 action = np.concatenate([delta_pos,   delta_rot, [gripper_action]]).astype(np.float32)
-
+ 
                 episode_frames.append({
                     "image":       front_imgs[i],
                     "wrist_image": wrist_imgs[i],
@@ -154,12 +158,15 @@ def main(
                     "actions":     action,
                     "task":        task_prompt,
                 })
+ 
+                prev_gripper_action = gripper_action
 
-            if total_windows > 0:
-                noop_percentage = (noop_count / total_windows) * 100
-                print(f"[{split['file']}] '{task_prompt}' | Noops: {noop_count}/{total_windows} windows ({noop_percentage:.2f}%) removed.")
+            if total_steps > 0:
+                noop_percentage = (noop_count / total_steps) * 100
+                print(f"[{split['file']}] '{task_prompt}' | Noops: {noop_count}/{total_steps} steps ({noop_percentage:.2f}%) removed.")
             else:
-                print(f"[{split['file']}] '{task_prompt}' | Episode too short to form a single {WINDOW}-frame window.")
+                print(f"[{split['file']}] '{task_prompt}' | Episode too short to form a single step.")
+
 
             for frame in episode_frames:
                 dataset.add_frame(frame)

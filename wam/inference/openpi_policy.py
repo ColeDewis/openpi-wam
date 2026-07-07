@@ -135,7 +135,7 @@ class OpenPIPolicy:
                 "observation/state": np.concatenate(
                     [robot_state["follower_cart_pos"], euler_rot, [robot_state["gripper_pos"]], [0]]
                 ),
-                "prompt": "touch the green thing",
+                "prompt": "reach for the green toy plushy",
             }
         else:
             raise Exception(f"Invalid cfg_type {self.cfg_type}")

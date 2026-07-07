@@ -736,6 +736,19 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
     TrainConfig(
+        name="pi05_libero",
+        model=pi0_config.Pi0Config(action_horizon=15, pi05=True),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
@@ -803,8 +816,8 @@ _CONFIGS = [
     TrainConfig(
         name="haptic_wam",
         resume=True,
-        save_interval=5000,
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        save_interval=3000,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         assets_base_dir="/home/serg/projects/openpi-wam/assets/",
         checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
         data=LeRobotLiberoDataConfig(
@@ -812,18 +825,23 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
+        freeze_filter= pi0_config.Pi0Config(pi05=True, action_horizon=10,
+             discrete_state_input=False,
+             paligemma_variant="gemma_2b_lora",
+             action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
         wandb_enabled=False,
-        batch_size=4,
+        batch_size=8,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=5e-5,
-            decay_steps=1_000_000,
-            decay_lr=1e-6,
+            warmup_steps=1_200,
+            peak_lr=3e-5,
+            decay_steps=20_000,
+            decay_lr=3e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
+        num_train_steps=15_000,
     ),
     #
     # Fine-tuning Aloha configs.
