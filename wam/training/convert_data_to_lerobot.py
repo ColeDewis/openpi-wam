@@ -144,7 +144,7 @@ def main(
                 # NOTE: in libero close is 1 and -1 is open
                 gripper_action = 1 if gripper > -0.01 else -1 # assuming gripper close is around 0 and open is around -0.04
 
-                state  = np.concatenate([cart_pos[i], euler,     [gripper], [0]]).astype(np.float32)
+                state  = np.concatenate([cart_pos[i], euler,     [gripper], [-gripper]]).astype(np.float32)
                 action = np.concatenate([delta_pos,   delta_rot, [gripper_action]]).astype(np.float32)
 
                 episode_frames.append({

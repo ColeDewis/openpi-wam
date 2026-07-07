@@ -372,7 +372,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam/haptic_wam_test/25000/",
+        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam/haptic_wam_test/10000/",
         help="Path to model checkpoint",
     )
     parser.add_argument(

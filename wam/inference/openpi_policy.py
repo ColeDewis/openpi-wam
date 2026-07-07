@@ -15,25 +15,17 @@ from scipy.spatial.transform import Rotation as R
 WAM_MIN_LIMITS = np.array([-2.5, -1.9, -2.6, -0.7, -4.5, -1.4, -2.9])
 WAM_MAX_LIMITS = np.array([2.5, 1.9, 2.6, 2.9, 1.1, 1.4, 2.9])
 
-WAM_FORCE_LIMIT  = 10
-WAM_TORQUE_LIMIT =  0
+WAM_FORCE_LIMIT  = 5
+WAM_TORQUE_LIMIT =  5
  
-KP_POS = 500   # N/m
-KP_ROT = 1   # N·m/rad
+KP_POS = 50   # N/m
+KP_ROT = 25   # N·m/rad
  
 def quat_to_euler(quat):
     """Quaternion [w, x, y, z] → Euler (roll, pitch, yaw) in radians."""
     quat_xyzw = np.roll(quat, -1, axis=-1)
     
     return R.from_quat(quat_xyzw).as_euler('xyz', degrees=False)
-
-def delta_euler(rot_current, rot_next):
-    """Minimal rotation delta between two quaternions, expressed as Euler xyz."""
-    curr_xyzw = np.roll(rot_current, -1, axis=-1)
-    next_xyzw = np.roll(rot_next, -1, axis=-1)
-    
-    r_delta = R.from_quat(curr_xyzw).inv() * R.from_quat(next_xyzw)
-    return r_delta.as_euler('xyz', degrees=False)
 
 def _euler_delta_to_rot_error(delta_euler_xyz: np.ndarray) -> np.ndarray:
     """
@@ -152,7 +144,7 @@ class OpenPIPolicy:
         inference_output = self.policy.infer(example)
         inf_time = inference_output["policy_timing"]["infer_ms"]
         action_chunk = inference_output["actions"]
- 
+
         wrench_chunk = np.stack(
             [delta_to_wrench(d) for d in action_chunk]
         )
