@@ -818,8 +818,10 @@ _CONFIGS = [
         resume=True,
         save_interval=3000,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        assets_base_dir="/home/serg/projects/openpi-wam/assets/",
-        checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
+        # assets_base_dir="/home/serg/projects/openpi-wam/assets/",
+        assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
+        # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
+        checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
         data=LeRobotLiberoDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),

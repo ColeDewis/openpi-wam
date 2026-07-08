@@ -18,7 +18,8 @@ module load mujoco/3.3.0
 module load gcc
 module load arrow/23.0.1
 
-export OPENPI_REPO=/home/serg/projects/openpi-wam
+# export OPENPI_REPO=/home/serg/projects/openpi-wam
+export OPENPI_REPO=/project/def-jag/serg/openpi-wam
 
 echo "move venv"
 cd $SLURM_TMPDIR

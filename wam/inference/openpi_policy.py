@@ -76,7 +76,8 @@ class OpenPIPolicy:
         self.checkpoint_path = checkpoint_path
         self.config = _config.get_config(model_config)
         wam_assets = _config.AssetsConfig(
-            assets_dir="/home/serg/projects/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
+            # assets_dir="/home/serg/projects/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
+            assets_dir="/project/def-jag/serg/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
         )
         new_data_cfg = dataclasses.replace(self.config.data, assets=wam_assets)
         self.config = dataclasses.replace(self.config, data=new_data_cfg)
