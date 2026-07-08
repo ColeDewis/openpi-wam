@@ -18,15 +18,9 @@ WAM_MAX_LIMITS = np.array([2.5, 1.9, 2.6, 2.9, 1.1, 1.4, 2.9])
 WAM_FORCE_LIMIT  = 5
 WAM_TORQUE_LIMIT =  5
  
-KP_POS = 50   # N/m
-KP_ROT = 25   # N·m/rad
+KP_POS = 100   # N/m
+KP_ROT = 100   # N·m/rad
  
-def quat_to_euler(quat):
-    """Quaternion [w, x, y, z] → Euler (roll, pitch, yaw) in radians."""
-    quat_xyzw = np.roll(quat, -1, axis=-1)
-    
-    return R.from_quat(quat_xyzw).as_euler('xyz', degrees=False)
-
 def _euler_delta_to_rot_error(delta_euler_xyz: np.ndarray) -> np.ndarray:
     """
     Convert an incremental euler-XYZ delta (radians, EE frame) to a rotation
@@ -76,8 +70,8 @@ class OpenPIPolicy:
         self.checkpoint_path = checkpoint_path
         self.config = _config.get_config(model_config)
         wam_assets = _config.AssetsConfig(
-            # assets_dir="/home/serg/projects/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
-            assets_dir="/project/def-jag/serg/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
+            assets_dir="/home/serg/projects/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
+            # assets_dir="/project/def-jag/serg/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
         )
         new_data_cfg = dataclasses.replace(self.config.data, assets=wam_assets)
         self.config = dataclasses.replace(self.config, data=new_data_cfg)
@@ -118,6 +112,25 @@ class OpenPIPolicy:
             }
             self.policy.infer(example)
 
+        self._prev_euler = None
+
+    def quat_to_euler(self, quat):
+        """Quaternion [w, x, y, z] → Euler (roll, pitch, yaw) in radians. also keeps angles continuous"""
+        quat_xyzw = np.roll(quat, -1, axis=-1)
+        
+        euler = R.from_quat(quat_xyzw).as_euler('xyz', degrees=False)
+
+        if self._prev_euler is None:
+            self._prev_euler = euler
+            return euler
+
+        # stack [prev, current] and unwrap along axis=0, same as training script
+        euler = np.unwrap(np.stack([self._prev_euler, euler]), axis=0)[1]
+
+        self._prev_euler = euler
+
+        return euler
+
 
     def _model_inference(self, front_image, wrist_image, robot_state):
         if self.cfg_type == "droid":
@@ -129,12 +142,13 @@ class OpenPIPolicy:
                 "prompt": "touch the green toy",
             }
         elif self.cfg_type == "libero":
-            euler_rot = quat_to_euler(robot_state["follower_cart_rot"])
+            euler_rot = self.quat_to_euler(robot_state["follower_cart_rot"])
             example = {
                 "observation/image": front_image,
                 "observation/wrist_image": wrist_image,
                 "observation/state": np.concatenate(
-                    [robot_state["follower_cart_pos"], euler_rot, [robot_state["gripper_pos"]], [0]]
+                    # [robot_state["follower_cart_pos"], euler_rot, [robot_state["gripper_pos"]], [-robot_state["gripper_pos"]]]
+                    [robot_state["follower_cart_pos"], euler_rot, [0.015], [-0.015]]
                 ),
                 "prompt": "reach for the green toy plushy",
             }
@@ -152,8 +166,8 @@ class OpenPIPolicy:
  
         if self.debug:
             cprint(inf_time, "blue")
+            cprint(example["observation/state"], "cyan")
             for i, chunk in enumerate(wrench_chunk):
-            # cprint(example, "cyan")
             # for i, (action) in enumerate(action_chunk):
                 cprint(
                     f"step {i:02d} | "

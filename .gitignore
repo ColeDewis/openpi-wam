@@ -171,6 +171,7 @@ cython_debug/
 dlimp/
 lerobot/
 dataset/*
+old_datasets/*
 
 *.swp
 
