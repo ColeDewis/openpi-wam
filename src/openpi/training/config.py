@@ -831,7 +831,7 @@ _CONFIGS = [
              action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         wandb_enabled=False,
-        batch_size=8,
+        batch_size=4,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_200,
             peak_lr=3e-5,
