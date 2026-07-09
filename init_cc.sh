@@ -6,5 +6,5 @@ module load opencv/4.11.0
 module load mujoco/3.3.0 
 module load gcc arrow/23.0.1
 
-# source /home/serg/projects/openpi-wam/.venv/bin/activate
-source /project/def-jag/serg/openpi-wam/.venv/bin/activate
+source /home/serg/projects/openpi-wam/.venv/bin/activate
+# source /project/def-jag/serg/openpi-wam/.venv/bin/activate
