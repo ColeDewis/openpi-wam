@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=test_wam
+#SBATCH --job-name=pi05_job_long
 #SBATCH --time=05:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
