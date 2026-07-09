@@ -4,8 +4,8 @@ if not using cc install with ```uv pip install -e ".[recording]"```
 # running in cc
 ```
 python -m wam.training.pull_lerobot
-python3 scripts/compute_norm_stats.py --config-name haptic_wam
-python3 scripts/train.py haptic_wam --exp-name=haptic_wam_test
+python3 scripts/compute_norm_stats.py --config-name haptic_wam_pi05
+python3 scripts/train.py haptic_wam_pi05 --exp-name=haptic_wam_pi05
 
 ```
 for interactive do

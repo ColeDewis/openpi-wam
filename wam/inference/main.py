@@ -90,8 +90,8 @@ class PiZeroTeleop:
 
         # Set up recorder
         self.loop_state = "IDLE"  # States: IDLE, RECORDING, PENDING
-        self.episode_counter = 0
         self.recorder = HDF5Recorder(save_dir="./dataset")
+        self.episode_counter = self.recorder.get_next_episode_index()
 
         # Set up Joystick
         self.joy_fd = None
@@ -179,7 +179,7 @@ class PiZeroTeleop:
     def _save_episode(self):
         """Handles packaging and saving the episode to disk."""
         ep_name = f"episode_{int(time.time())}_{self.episode_counter}"
-        
+       
         metadata = {
             "action_horizon": self.action_horizon,
             "dof": self.DOF

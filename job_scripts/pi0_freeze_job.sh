@@ -36,4 +36,4 @@ export HF_DATASETS_OFFLINE=1
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
 echo "starting"
-python3 $OPENPI_REPO/scripts/train.py haptic_wam --exp-name=haptic_wam_test
+python3 $OPENPI_REPO/scripts/train.py haptic_wam_pi0_freeze --exp-name=haptic_wam_pi0_freeze

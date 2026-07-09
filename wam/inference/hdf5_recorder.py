@@ -2,7 +2,8 @@ import h5py
 import numpy as np
 import os
 from collections import defaultdict
-
+import glob
+import re
 
 class HDF5Recorder:
     def __init__(self, save_dir="./dataset"):
@@ -33,6 +34,23 @@ class HDF5Recorder:
             # Base case: it's a list of arrays/numbers, so save as dataset
             data = np.array(data_list)
             h5_group.create_dataset(key, data=data, compression="gzip")
+
+    def get_next_episode_index(self):
+        """Scans save_dir for episode_*_N.hdf5 files and returns max(N) + 1."""
+        pattern = os.path.join(self.save_dir, "episode_*_*.hdf5")
+        existing = glob.glob(pattern)
+
+        max_idx = -1
+        regex = re.compile(r"_(\d+)\.hdf5$")
+
+        for filepath in existing:
+            filename = os.path.basename(filepath)
+            match = regex.search(filename)
+            if match:
+                idx = int(match.group(1))
+                max_idx = max(max_idx, idx)
+
+        return max_idx + 1
 
     def save_episode(self, episode_name, metadata):
         if not self.episode_data:
