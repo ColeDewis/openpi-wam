@@ -25,7 +25,15 @@ def quats_to_euler(quats):
     quats_xyzw = np.roll(quats, -1, axis=-1)
     
     euler = R.from_quat(quats_xyzw).as_euler('xyz', degrees=False)  # (N,3)
+
     return np.unwrap(euler, axis=0)
+
+def quats_to_rotvec(quats):
+    """compute state angle as a rotvec based on the home quat"""
+    quats_xyzw = np.roll(quats, -1, axis=-1)
+    ref_xyzw = np.roll(np.array([0.8311519102829725, 0.0005888003896006177, -0.556030721230029, -0.003999049322114239]), -1 , axis=-1) # home quat
+    r = R.from_quat(ref_xyzw).inv() * R.from_quat(quats_xyzw)
+    return r.as_rotvec()
 
 
 def delta_rotvec(rot_current, rot_next):
@@ -112,7 +120,8 @@ def main(
             cart_rot    = src_h5["low_dim/follower_cart_rot"][:]
             gripper_arr = src_h5["low_dim/gripper_pos"][:]
 
-            eulers = quats_to_euler(cart_rot)
+            # eulers = quats_to_euler(cart_rot)
+            rotvecs = quats_to_rotvec(cart_rot)
 
             t_start = timestamps[0]
             t_end   = timestamps[-1]
@@ -147,8 +156,8 @@ def main(
                 # zero out individual axes of the kept delta that are near zero
                 delta_pos, delta_rot = zero_noop_axes(delta_pos, delta_rot)
  
-                euler = eulers[i]
-                state  = np.concatenate([cart_pos[i], euler,     [gripper], [-gripper]]).astype(np.float32)
+                state_angle = rotvecs[i]
+                state  = np.concatenate([cart_pos[i], state_angle,     [gripper], [-gripper]]).astype(np.float32)
                 action = np.concatenate([delta_pos,   delta_rot, [gripper_action]]).astype(np.float32)
  
                 episode_frames.append({

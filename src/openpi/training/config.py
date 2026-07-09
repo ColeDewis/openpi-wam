@@ -935,6 +935,39 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=15_000,
     ),
+    TrainConfig(
+        name="haptic_wam_pi05_freeze_long",
+        resume=True,
+        save_interval=10000,
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        assets_base_dir="/home/serg/projects/openpi-wam/assets/",
+        # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
+        checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
+        # checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
+        data=LeRobotLiberoDataConfig(
+            repo_id="Breakdancingbear/wam_teleop_dataset",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        freeze_filter= pi0_config.Pi0Config(pi05=True, action_horizon=10,
+             discrete_state_input=False,
+             paligemma_variant="gemma_2b_lora",
+             action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        wandb_enabled=False,
+        batch_size=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_200,
+            peak_lr=3e-5,
+            decay_steps=20_000,
+            decay_lr=3e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        keep_period=1000,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
     #
     # Fine-tuning Aloha configs.
     #

@@ -177,5 +177,5 @@ old_datasets/*
 
 venv*.tar
 
-Breakdancingbear
+/Breakdancingbear
 hf_dataset.tar
