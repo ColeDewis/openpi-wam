@@ -372,11 +372,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam/haptic_wam_test/12000/",
+        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam/haptic_wam_pi05_freeze_long/20000",
         help="Path to model checkpoint",
     )
     parser.add_argument(
-        "--config", type=str, default="haptic_wam", help="Policy config name. see config.py"
+        "--config", type=str, default="haptic_wam_pi05", help="Policy config name. see config.py"
     )
 
     # System config

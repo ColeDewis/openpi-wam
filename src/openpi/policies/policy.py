@@ -99,6 +99,10 @@ class Policy(BasePolicy):
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
 
+        print("\n\n\n\n")
+        print("BEFORE NORMALIZATION")
+        print(outputs)
+        print("\n\n\n\n")
         outputs = self._output_transform(outputs)
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
