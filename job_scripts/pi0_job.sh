@@ -19,6 +19,8 @@ module load gcc
 module load arrow/23.0.1
 
 export OPENPI_REPO=/home/serg/projects/openpi-wam
+export OPENPI_ASSETS_DIR="/home/serg/projects/openpi-wam/assets/"
+export OPENPI_CHECKPOINTS_DIR="/scratch/serg/openpi-wam/checkpoints/"
 # export OPENPI_REPO=/project/def-jag/serg/openpi-wam
 
 echo "move venv"
