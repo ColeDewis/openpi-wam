@@ -21,8 +21,8 @@ export HF_LEROBOT_HOME=$SLURM_TMPDIR
 export HF_DATASETS_OFFLINE=1
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
-# store base pi model in project dir instead of ~/.cache
-export _OPENPI_DATA_HOME="${PROJECT_CACHE}/openpi"
+# store base pi models in project dir instead of ~/.cache
+export OPENPI_DATA_HOME="${PROJECT_CACHE}/openpi"
 
 echo "starting"
 python3 $OPENPI_REPO/scripts/train.py haptic_wam_pi0 --exp-name=haptic_wam_pi0
