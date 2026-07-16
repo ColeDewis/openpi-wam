@@ -8,7 +8,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 import tyro
-from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
+from lerobot.common.datasets.lerobot_dataset import (HF_LEROBOT_HOME,
+                                                     LeRobotDataset)
 
 
 def find_nearest_index(timestamps, target_time):
@@ -108,6 +109,11 @@ def main(
                 state = np.concatenate([jp, [gripper]]).astype(np.float32)
                 action = np.concatenate([jp, [gripper]]).astype(np.float32)
 
+                # "
+                # Gripper positions are in [0.0, 1.0], with 0.0 corresponding to fully open and 1.0 corresponding to fully closed."
+                #
+
+
                 episode_frames.append(
                     {
                         "image": front_imgs[i],
@@ -123,13 +129,13 @@ def main(
 
             dataset.save_episode()
 
-    # print(f"Pushing to HuggingFace Hub as {save_name} ...")
+    print(f"Pushing to HuggingFace Hub as {save_name} ...")
     # make sure to hf auth login
-    # dataset.push_to_hub(
-    #     repo_id=save_name,
-    #     private=False,
-    # )
-    # print(f"https://huggingface.co/datasets/{save_name}")
+    dataset.push_to_hub(
+        repo_id=save_name,
+        private=False,
+    )
+    print(f"https://huggingface.co/datasets/{save_name}")
 
 
 if __name__ == "__main__":

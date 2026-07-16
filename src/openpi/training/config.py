@@ -364,7 +364,7 @@ class LeRobotWamDataConfig(DataConfigFactory):
     comments below.
     """
 
-    extra_delta_transform: bool = False
+    extra_delta_transform: bool = True
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -896,14 +896,11 @@ _CONFIGS = [
         resume=True,
         save_interval=3000,
         model=pi0_config.Pi0Config(action_horizon=10, discrete_state_input=False),
-        assets_base_dir="/home/serg/projects/openpi-wam/assets/",
-        # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
-        # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
-        checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
-        data=LeRobotLiberoDataConfig(
+        assets_base_dir=os.getenv("OPENPI_ASSETS_DIR", "./assets/"),
+        checkpoint_base_dir=os.getenv("OPENPI_CHECKPOINTS_DIR", "./checkpoints/"),
+        data=LeRobotWamDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
         ),
         wandb_enabled=False,
         batch_size=4,
@@ -925,13 +922,10 @@ _CONFIGS = [
         save_interval=3000,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         assets_base_dir=os.getenv("OPENPI_ASSETS_DIR", "./assets/"),
-        # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
-        # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
         checkpoint_base_dir=os.getenv("OPENPI_CHECKPOINTS_DIR", "./checkpoints/"),
         data=LeRobotWamDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=True,
         ),
         wandb_enabled=False,
         batch_size=4,
@@ -952,14 +946,11 @@ _CONFIGS = [
         resume=True,
         save_interval=3000,
         model=pi0_config.Pi0Config(action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        assets_base_dir="/home/serg/projects/openpi-wam/assets/",
-        # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
-        # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
-        checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
-        data=LeRobotLiberoDataConfig(
+        assets_base_dir=os.getenv("OPENPI_ASSETS_DIR", "./assets/"),
+        checkpoint_base_dir=os.getenv("OPENPI_CHECKPOINTS_DIR", "./checkpoints/"),
+        data=LeRobotWamDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
         ),
         freeze_filter= pi0_config.Pi0Config(action_horizon=10,
              discrete_state_input=False,
@@ -985,14 +976,11 @@ _CONFIGS = [
         resume=True,
         save_interval=3000,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        assets_base_dir="/home/serg/projects/openpi-wam/assets/",
-        # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
-        # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
-        checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
-        data=LeRobotLiberoDataConfig(
+        assets_base_dir=os.getenv("OPENPI_ASSETS_DIR", "./assets/"),
+        checkpoint_base_dir=os.getenv("OPENPI_CHECKPOINTS_DIR", "./checkpoints/"),
+        data=LeRobotWamDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
         ),
         freeze_filter= pi0_config.Pi0Config(pi05=True, action_horizon=10,
              discrete_state_input=False,
@@ -1018,14 +1006,11 @@ _CONFIGS = [
         resume=True,
         save_interval=10000,
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        assets_base_dir="/home/serg/projects/openpi-wam/assets/",
-        # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
-        # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
-        checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
-        data=LeRobotLiberoDataConfig(
+        assets_base_dir=os.getenv("OPENPI_ASSETS_DIR", "./assets/"),
+        checkpoint_base_dir=os.getenv("OPENPI_CHECKPOINTS_DIR", "./checkpoints/"),
+        data=LeRobotWamDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
         ),
         freeze_filter= pi0_config.Pi0Config(pi05=True, action_horizon=10,
              discrete_state_input=False,
