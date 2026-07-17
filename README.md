@@ -10,7 +10,7 @@ python3 scripts/train.py haptic_wam_pi05 --exp-name=haptic_wam_pi05
 ```
 for interactive do
 ```bash
-salloc --time=1:30:0 -cpus-per-task=8 --gres=gpu:h100:1 --mem=16G --nodes=1
+salloc --time=1:30:0 --cpus-per-task=8 --gres=gpu:h100:1 --mem=16G --nodes=1 --account=def-jag
 srun --jobid <jobid> --pty bash
 ```
 
