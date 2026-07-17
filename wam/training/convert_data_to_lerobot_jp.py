@@ -109,10 +109,6 @@ def main(
                 state = np.concatenate([jp, [gripper]]).astype(np.float32)
                 action = np.concatenate([jp, [gripper]]).astype(np.float32)
 
-                # "
-                # Gripper positions are in [0.0, 1.0], with 0.0 corresponding to fully open and 1.0 corresponding to fully closed."
-                #
-
 
                 episode_frames.append(
                     {

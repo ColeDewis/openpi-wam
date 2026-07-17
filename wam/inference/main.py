@@ -86,7 +86,7 @@ class PiZeroTeleop:
 
         # pi0 Model Configuration
         if self.doing_inference:
-            self.policy = OpenPIPolicy(checkpoint_path, model_config, "libero", debug=self.debug, dof=self.DOF)
+            self.policy = OpenPIPolicy(checkpoint_path, model_config, debug=self.debug, dof=self.DOF)
 
         # Set up recorder
         self.loop_state = "IDLE"  # States: IDLE, RECORDING, PENDING
