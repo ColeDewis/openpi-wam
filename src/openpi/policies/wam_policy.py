@@ -12,7 +12,9 @@ def make_wam_example() -> dict:
     return {
         "observation/state": np.random.rand(8),
         "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/wrist_image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
+        "observation/wrist_image": np.random.randint(
+            256, size=(224, 224, 3), dtype=np.uint8
+        ),
         "prompt": "do something",
     }
 
@@ -41,7 +43,6 @@ class WamInputs(transforms.DataTransformFn):
         base_image = _parse_image(data["observation/image"])
         wrist_image = _parse_image(data["observation/wrist_image"])
 
-
         # TODO: map gripper to this range
         # Gripper positions are in [0.0, 1.0], with 0.0 corresponding to fully open and 1.0 corresponding to fully closed."
         #
@@ -59,7 +60,11 @@ class WamInputs(transforms.DataTransformFn):
                 "base_0_rgb": np.True_,
                 "left_wrist_0_rgb": np.True_,
                 # We only mask padding images for pi0 model, not pi0-FAST. Do not change this for your own dataset.
-                "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
+                "right_wrist_0_rgb": (
+                    np.True_
+                    if self.model_type == _model.ModelType.PI0_FAST
+                    else np.False_
+                ),
             },
         }
 
@@ -71,6 +76,8 @@ class WamInputs(transforms.DataTransformFn):
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not
         # stored in "prompt"; the output dict always needs to have the key "prompt").
+        # NOTE: Consider adding to the prompt for control modes other than joint.
+        # For more info see: https://github.com/Physical-Intelligence/openpi/discussions/302
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
