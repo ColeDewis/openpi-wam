@@ -8,8 +8,11 @@ module load opencv/4.11.0
 module load mujoco/3.3.0 
 module load gcc arrow/23.0.1
 
-virtualenv --no-download .venv
-source .venv/bin/activate
+VENV_DIR="${HOME}/PI_ENV" 
+
+virtualenv --no-download "${VENV_DIR}"
+source "${VENV_DIR}/bin/activate"
+pip install --no-index --upgrade pip
 
 export PIP_ONLY_BINARY="mujoco,polars,polars-runtime-32"
 
