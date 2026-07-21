@@ -23,5 +23,5 @@ export OPENPI_CHECKPOINTS_DIR="${HOME}/scratch/openpi-wam/checkpoints/"
 export PROJECT_CACHE="${OPENPI_REPO}/.cache"
 mkdir -p "${PROJECT_CACHE}"
 
-source "${OPENPI_REPO}/.venv/bin/activate"
+source "${HOME}/PI_ENV/bin/activate"
 # source /project/def-jag/serg/openpi-wam/.venv/bin/activate
