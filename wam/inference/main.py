@@ -1,17 +1,19 @@
 import argparse
-import signal
-import time
-from pynput import keyboard
-import struct
 import os
+import signal
+import struct
+import time
+
 import cv2
 import numpy as np
+from pynput import keyboard
 from termcolor import cprint
-from wam.inference.openpi_policy import OpenPIPolicy
-from wam.inference.hdf5_recorder import HDF5Recorder
-from wam.inference.udp_handler import TeleopUDPHandler
-from wam.inference.recorder_receiver import RecorderReceiver
+
 from wam.flir.multi_flir_manager import MultiFLIRManager
+from wam.inference.hdf5_recorder import HDF5Recorder
+from wam.inference.openpi_policy import OpenPIPolicy
+from wam.inference.recorder_receiver import RecorderReceiver
+from wam.inference.udp_handler import TeleopUDPHandler
 
 np.set_printoptions(precision=4, suppress=True)
 
@@ -59,7 +61,7 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.loop_hz = loop_hz
-        self.send_interval = 0.5 # send interpolated points for 3 seconds
+        self.send_interval = 0.5  # send interpolated points for 3 seconds
         self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
@@ -67,13 +69,17 @@ class PiZeroTeleop:
         # UDP Configuration
         self.remote_ip = remote_ip
         self.send_port = send_port
-        self.recv_port = recv_port # not used
+        self.recv_port = recv_port  # not used
         self.DOF = dof
 
         # even though we listen to the follower we actually also get leader data, just dont do anything with it for now
         # also, leader data is just 0's if we dont start the leader
-        self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
-        self.follower_sender = TeleopUDPHandler(self.remote_ip, self.send_port, DOF=self.DOF)
+        self.follower_listener = RecorderReceiver(
+            self.remote_ip, self.recv_port, self.DOF
+        )
+        self.follower_sender = TeleopUDPHandler(
+            self.remote_ip, self.send_port, DOF=self.DOF
+        )
 
         # FLIR setup
         camera_configs = {
@@ -83,10 +89,15 @@ class PiZeroTeleop:
         self.camera_manager = MultiFLIRManager(camera_configs)
         self.camera_manager.start_all()
 
-
         # pi0 Model Configuration
         if self.doing_inference:
-            self.policy = OpenPIPolicy(checkpoint_path, model_config, debug=self.debug, dof=self.DOF)
+            self.policy = OpenPIPolicy(
+                checkpoint_path,
+                model_config,
+                cfg_type="wam",
+                debug=self.debug,
+                dof=self.DOF,
+            )
 
         # Set up recorder
         self.loop_state = "IDLE"  # States: IDLE, RECORDING, PENDING
@@ -109,7 +120,10 @@ class PiZeroTeleop:
             self.joy_fd = os.open("/dev/input/js0", os.O_RDONLY | os.O_NONBLOCK)
             cprint("[SYSTEM] Successfully opened joystick /dev/input/js0", "green")
         except OSError:
-            cprint("[SYSTEM] Could not open joystick /dev/input/js0. Continuing without joystick.", "yellow")
+            cprint(
+                "[SYSTEM] Could not open joystick /dev/input/js0. Continuing without joystick.",
+                "yellow",
+            )
 
     def _poll_joystick(self):
         """Reads non-blocking events from the joystick."""
@@ -122,7 +136,7 @@ class PiZeroTeleop:
                 if not event_data:
                     break
 
-                time_msec, value, ev_type, number = struct.unpack('IhBB', event_data)
+                time_msec, value, ev_type, number = struct.unpack("IhBB", event_data)
 
                 # Remove the init event flag (0x80)
                 ev_type &= ~0x80
@@ -138,7 +152,6 @@ class PiZeroTeleop:
             pass
         except Exception as e:
             cprint(f"[SYSTEM] Error reading joystick: {e}", "red")
-
 
     def _on_key_press(self, key):
         """Asynchronous callback for keyboard events."""
@@ -174,17 +187,17 @@ class PiZeroTeleop:
         if self.loop_state in ["RECORDING", "PENDING"]:
             self.recorder.clear()
             self.loop_state = "IDLE"
-            cprint("\n[RECORDER] 🗑 Episode discarded. Press [R] or 'o' to start a new one.", "red")
+            cprint(
+                "\n[RECORDER] 🗑 Episode discarded. Press [R] or 'o' to start a new one.",
+                "red",
+            )
 
     def _save_episode(self):
         """Handles packaging and saving the episode to disk."""
         ep_name = f"episode_{int(time.time())}_{self.episode_counter}"
-       
-        metadata = {
-            "action_horizon": self.action_horizon,
-            "dof": self.DOF
-        }
-        
+
+        metadata = {"action_horizon": self.action_horizon, "dof": self.DOF}
+
         self.recorder.save_episode(ep_name, metadata)
         self.episode_counter += 1
         self.loop_state = "IDLE"
@@ -283,6 +296,7 @@ class PiZeroTeleop:
             loop_delay = 1 / self.loop_hz
             waiting_counter = 0
             while self.system_running:
+                # TODO: consider using one of the precise time variants (ex time.perf_counter() or time.monotonic())
                 loop_start_time = time.time()
 
                 self._poll_joystick()
@@ -320,17 +334,18 @@ class PiZeroTeleop:
                     self.recorder.add_step(obs)
 
                 # Infer + send to WAM
-                # if (loop_start_time - self.last_send_time) >= self.send_interval:
                 if self.doing_inference and self.loop_state == "RECORDING":
-                    action_chunk = self.policy.infer(obs)
-                    self.follower_sender.send_action_chunk(action_chunk)
+                    if (time.time() - self.last_send_time) >= self.send_interval:
+                        action_chunk = self.policy.infer(obs)
+                        self.follower_sender.send_action_chunk(action_chunk)
 
-                    # self.last_send_time = loop_start_time
+                        self.last_send_time = time.time()
 
                 # sleep, accounting for the time the loop already took to try and keep the desired frequency
                 elapsed_time = time.time() - loop_start_time
                 sleep_time = max(0.0, loop_delay - elapsed_time)
                 if sleep_time > 0:
+                    # TODO: implement sleep + spin for precise timing
                     time.sleep(sleep_time)
 
         except Exception as e:
@@ -376,11 +391,14 @@ if __name__ == "__main__":
         help="Path to model checkpoint",
     )
     parser.add_argument(
-        "--config", type=str, default="haptic_wam_pi05", help="Policy config name. see config.py"
+        "--config",
+        type=str,
+        default="haptic_wam_pi05",
+        help="Policy config name. see config.py",
     )
 
     # System config
-    parser.add_argument( # does not really work
+    parser.add_argument(  # does not really work
         "--debug",
         action="store_true",
         help="Display OpenCV windows and extra print statements",
@@ -415,7 +433,7 @@ if __name__ == "__main__":
         debug=args.debug,
         offline=args.offline,
         infer=args.infer,
-        record=args.record
+        record=args.record,
     )
 
     teleop.run()

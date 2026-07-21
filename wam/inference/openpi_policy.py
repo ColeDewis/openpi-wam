@@ -6,6 +6,7 @@ from scipy.spatial.transform import Rotation as R
 from termcolor import cprint
 
 from openpi.policies import policy_config
+from openpi.policies import wam_policy
 from openpi.shared import download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
@@ -69,8 +70,8 @@ class OpenPIPolicy:
 
         if cfg_type not in ["libero", "droid", "wam"]:
             cprint(
-                f"cfg_type: {cfg_type} must be one of libero, droid",
-                "wam" "red",
+                f"cfg_type: {cfg_type} must be one of libero, droid, wam",
+                "red",
             )
             return
 
@@ -94,7 +95,7 @@ class OpenPIPolicy:
         # )
 
         # Create a trained policy
-        # TODO: check that norm stats are correct. Should be the ones provided from fine tuning, not the base model. Not not we can manually load the params as above.
+        # TODO: check that norm stats are correct. Should be the ones provided from fine tuning, not the base model. If not we can manually load the params as above.
         self.policy = policy_config.create_trained_policy(self.config, checkpoint_dir)
 
         self.cfg_type = cfg_type
@@ -125,6 +126,12 @@ class OpenPIPolicy:
                 "prompt": "do something",
             }
             self.policy.infer(example)
+
+        elif cfg_type == "wam":
+
+            example = wam_policy.make_wam_example()
+            self.policy.infer(example)
+
 
         self._prev_euler = None
 
