@@ -46,8 +46,8 @@ class PiZeroTeleop:
         front_cam_serial: str,
         checkpoint_path: str,
         model_config: str,
-        action_horizon: int = 5,
-        loop_hz: int = 30,
+        action_horizon: int = 8,
+        loop_hz: int = 10,
         display_scale: int = 3,
         debug: bool = False,
         offline: bool = False,
@@ -61,10 +61,11 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.loop_hz = loop_hz
-        self.send_interval = 0.5  # send interpolated points for 3 seconds
-        self.last_send_time = 0.0
         self.doing_inference = infer
         self.doing_recording = record
+
+        self.send_interval = 1.0  # send interpolated points for 3 seconds
+        self.last_send_time = 0.0
 
         # UDP Configuration
         self.remote_ip = remote_ip
@@ -78,7 +79,7 @@ class PiZeroTeleop:
             self.remote_ip, self.recv_port, self.DOF
         )
         self.follower_sender = TeleopUDPHandler(
-            self.remote_ip, self.send_port, DOF=self.DOF
+            self.remote_ip, self.send_port, DOF=self.DOF, horizon=self.action_horizon
         )
 
         # FLIR setup
@@ -337,8 +338,7 @@ class PiZeroTeleop:
                 if self.doing_inference and self.loop_state == "RECORDING":
                     if (time.time() - self.last_send_time) >= self.send_interval:
                         action_chunk = self.policy.infer(obs)
-                        self.follower_sender.send_action_chunk(action_chunk)
-
+                        self.follower_sender.send_action_chunk(action_chunk[:self.action_horizon, :])
                         self.last_send_time = time.time()
 
                 # sleep, accounting for the time the loop already took to try and keep the desired frequency
@@ -387,7 +387,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="/mnt/10tb/serg/openpi-wam/checkpoints/haptic_wam/haptic_wam_pi05_freeze_long/20000",
+        default="/mnt/10tb/serg/29999",
         help="Path to model checkpoint",
     )
     parser.add_argument(

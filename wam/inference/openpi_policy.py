@@ -78,21 +78,8 @@ class OpenPIPolicy:
         self.DOF = dof
         self.checkpoint_path = checkpoint_path
         self.config = _config.get_config(model_config)
-        # wam_assets = _config.AssetsConfig(
-        #     assets_dir="/home/serg/projects/openpi-wam/assets/haptic_wam_pi05/Breakdancingbear",
-        #     asset_id="wam_teleop_dataset",
-        #     # assets_dir="/project/def-jag/serg/openpi-wam/assets/haptic_wam/Breakdancingbear", asset_id="wam_teleop_dataset"
-        # )
-        # new_data_cfg = dataclasses.replace(self.config.data, assets=wam_assets)
-        # self.config = dataclasses.replace(self.config, data=new_data_cfg)
         checkpoint_dir = download.maybe_download(self.checkpoint_path)
 
-        # norm_stats = _checkpoints.load_norm_stats(
-        #     wam_assets.assets_dir, wam_assets.asset_id
-        # )
-        # print(
-        #     f"trying to find norm_stats in {wam_assets.assets_dir} {wam_assets.asset_id}"
-        # )
 
         # Create a trained policy
         # TODO: check that norm stats are correct. Should be the ones provided from fine tuning, not the base model. If not we can manually load the params as above.
@@ -206,6 +193,17 @@ class OpenPIPolicy:
 
         inference_output = self.policy.infer(example)
         action_chunk = inference_output["actions"]
+        inf_time = inference_output["policy_timing"]["infer_ms"]
+
+        if self.debug:
+            cprint(inf_time, "blue")
+            cprint(example["observation/state"], "cyan")
+            for i, (action) in enumerate(action_chunk):
+                cprint(
+                    f"step {i:02d} | "
+                    f"action: {np.round(action, 4)} | "
+                    "cyan",
+                )
 
         return action_chunk
 

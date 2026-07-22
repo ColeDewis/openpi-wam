@@ -10,6 +10,14 @@ import numpy as np
 import tyro
 from lerobot.common.datasets.lerobot_dataset import (HF_LEROBOT_HOME,
                                                      LeRobotDataset)
+frame_cutoffs = [
+    850, 959, 745, 739, 880, 763, 843, 726, 731, 684,
+    777, 825, 859, 736, 800, 712, 642, 603, 806, 788,
+    616, 777, 611, 688, 514, 707, 580, 680, 877, 666,
+    748, 617, 630, 800, 550, 580, 500, 580, 790, 680,
+    600, 590, 580, 630, 650, 630, 500, 666, 740, 590,
+]
+
 
 
 def find_nearest_index(timestamps, target_time):

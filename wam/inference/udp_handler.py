@@ -17,7 +17,7 @@ class TeleopUDPHandler:
         self.remote_ip = remote_ip
         self.send_port = send_port
 
-        self.action_size = 7
+        self.action_size = 8
         
         # jp (DOF doubles) + jv (DOF doubles) + ext_torque (DOF doubles) +
         # meas_torque (DOF doubles) + gripper (1 double) + timestamp (uint64_t)
