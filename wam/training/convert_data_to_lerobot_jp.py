@@ -1,23 +1,14 @@
 # uv run python3 -m wam.training.convert_data_to_lerobot --dataset-dir ./dataset
 # uv run python3 -m wam.training.convert_data_to_lerobot --dataset-dir ./dataset --json-path episode_splits.json
 import json
-import os
-import shutil
 from pathlib import Path
+import shutil
 
 import h5py
+from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import numpy as np
 import tyro
-from lerobot.common.datasets.lerobot_dataset import (HF_LEROBOT_HOME,
-                                                     LeRobotDataset)
-frame_cutoffs = [
-    850, 959, 745, 739, 880, 763, 843, 726, 731, 684,
-    777, 825, 859, 736, 800, 712, 642, 603, 806, 788,
-    616, 777, 611, 688, 514, 707, 580, 680, 877, 666,
-    748, 617, 630, 800, 550, 580, 500, 580, 790, 680,
-    600, 590, 580, 630, 650, 630, 500, 666, 740, 590,
-]
-
 
 
 def find_nearest_index(timestamps, target_time):
@@ -26,26 +17,17 @@ def find_nearest_index(timestamps, target_time):
 
 
 def main(
-    dataset_dir: str,
-    json_path: str = "episode_splits.json",
+    dataset_dir: list[str],
     save_name: str = "Breakdancingbear/wam_teleop_dataset",
     overwrite: bool = False,
 ):
-    if not os.path.exists(json_path):
-        raise FileNotFoundError(f"Missing JSON file: {json_path}")
-
-    with open(json_path, "r") as f:
-        splits = json.load(f)
-
     hf_cache_path = HF_LEROBOT_HOME / Path(save_name)
     if hf_cache_path.exists():
         if overwrite:
             print(f"Overwriting existing cached dataset at {hf_cache_path}")
             shutil.rmtree(hf_cache_path)
         else:
-            response = input(
-                f"Cached dataset exists at {hf_cache_path}. Overwrite? [y/N]: "
-            )
+            response = input(f"Cached dataset exists at {hf_cache_path}. Overwrite? [y/N]: ")
             if response.strip().lower() == "y":
                 shutil.rmtree(hf_cache_path)
             else:
@@ -75,63 +57,67 @@ def main(
         image_writer_processes=5,
     )
 
-    dataset_path = Path(dataset_dir)
+    dataset_paths = [Path(d) for d in dataset_dir]
 
-    for split in splits:
-        hdf5_file_path = dataset_path / split["file"]
-        if not hdf5_file_path.exists():
-            continue
+    for d_path in dataset_paths:
+        json_path = d_path / "episode_splits.json"
 
-        task_prompt = (
-            split["task_names"][0]
-            if isinstance(split.get("task_names"), list)
-            else split.get("task_name", "")
-        )
+        if not json_path.exists():
+            raise FileNotFoundError(f"Missing required JSON file: {json_path}")
 
-        with h5py.File(hdf5_file_path, "r") as src_h5:
-            timestamps = src_h5["low_dim/timestamp_ns"][:]
-            front_imgs = src_h5["front_image"][:]
-            wrist_imgs = src_h5["wrist_image"][:]
-            jp_arr = src_h5["low_dim/follower_jp"][:]
-            gripper_arr = src_h5["low_dim/gripper_pos"][:]
+        with open(json_path) as f:
+            splits = json.load(f)
 
-            t_start = timestamps[0]
-            t_end = timestamps[-1]
+        for split in splits:
+            hdf5_file_path = d_path / split["file"]
+            if not hdf5_file_path.exists():
+                continue
 
-            step_ns = 100_000_000
-            target_times = np.arange(
-                t_start, t_end, step_ns
-            )  # 0.1s timestep for a 10fps dataset
+            task_prompt = (
+                split["task_names"][0] if isinstance(split.get("task_names"), list) else split.get("task_name", "")
+            )
 
-            sampled_indices = [find_nearest_index(timestamps, t) for t in target_times]
-            sampled_indices = list(dict.fromkeys(sampled_indices))
-            n_sampled = len(sampled_indices)
-            episode_frames = []
+            with h5py.File(hdf5_file_path, "r") as src_h5:
+                timestamps = src_h5["low_dim/timestamp_ns"][:]
+                front_imgs = src_h5["front_image"][:]
+                wrist_imgs = src_h5["wrist_image"][:]
+                jp_arr = src_h5["low_dim/follower_jp"][:]
+                gripper_arr = src_h5["low_dim/gripper_pos"][:]
 
-            for idx in range(n_sampled):
-                i = sampled_indices[idx]
+                t_start = timestamps[0]
+                t_end = timestamps[-1]
 
-                jp = jp_arr[i]
-                gripper = gripper_arr[i]
+                step_ns = 100_000_000
+                target_times = np.arange(t_start, t_end, step_ns)  # 0.1s timestep for a 10fps dataset
 
-                state = np.concatenate([jp, [gripper]]).astype(np.float32)
-                action = np.concatenate([jp, [gripper]]).astype(np.float32)
+                sampled_indices = [find_nearest_index(timestamps, t) for t in target_times]
+                sampled_indices = list(dict.fromkeys(sampled_indices))
+                n_sampled = len(sampled_indices)
+                episode_frames = []
 
+                for idx in range(n_sampled):
+                    i = sampled_indices[idx]
 
-                episode_frames.append(
-                    {
-                        "image": front_imgs[i],
-                        "wrist_image": wrist_imgs[i],
-                        "state": state,
-                        "actions": action,
-                        "task": task_prompt,
-                    }
-                )
+                    jp = jp_arr[i]
+                    gripper = gripper_arr[i]
 
-            for frame in episode_frames:
-                dataset.add_frame(frame)
+                    state = np.concatenate([jp, [gripper]]).astype(np.float32)
+                    action = np.concatenate([jp, [gripper]]).astype(np.float32)
 
-            dataset.save_episode()
+                    episode_frames.append(
+                        {
+                            "image": front_imgs[i],
+                            "wrist_image": wrist_imgs[i],
+                            "state": state,
+                            "actions": action,
+                            "task": task_prompt,
+                        }
+                    )
+
+                for frame in episode_frames:
+                    dataset.add_frame(frame)
+
+                dataset.save_episode()
 
     print(f"Pushing to HuggingFace Hub as {save_name} ...")
     # make sure to hf auth login
