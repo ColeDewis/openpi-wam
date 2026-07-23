@@ -7,12 +7,20 @@ import argparse
 import sys
 from pathlib import Path
 
-def main(dataset_dir, output_json):
+def main(dataset_dir, output_json, batch_task=None):
     dataset_path = Path(dataset_dir)
     files = sorted([f for f in dataset_path.iterdir() if f.suffix == '.hdf5'])
     
     if not files:
         sys.exit(1)
+
+    # Early exit for batch processing
+    if batch_task is not None:
+        print(f"Applying task '{batch_task}' to all {len(files)} files...")
+        output_data = [{"file": f.name, "task_names": [batch_task]} for f in files]
+        with open(output_json, 'w') as out_f:
+            json.dump(output_data, out_f, indent=2)
+        return
 
     results = {f.name: [] for f in files}
     file_idx, frame_idx = 0, 0
@@ -100,6 +108,9 @@ def main(dataset_dir, output_json):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset_dir")
-    parser.add_argument("--out", default="episode_splits.json")
+    parser.add_argument("--out", default=None, help="Defaults to dataset_dir/episode_splits.json")
+    parser.add_argument("--task", default=None, help="Apply a single task name to all files and skip GUI")
     args = parser.parse_args()
-    main(args.dataset_dir, args.out)
+    if args.out is None:
+        args.out = str(Path(args.dataset_dir) / "episode_splits.json")
+    main(args.dataset_dir, args.out, args.task)
