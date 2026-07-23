@@ -6,7 +6,6 @@ import numpy as np
 from openpi import transforms
 from openpi.models import model as _model
 
-
 def make_wam_example() -> dict:
     """Creates a random input example for the Libero policy."""
     return {
@@ -28,6 +27,18 @@ def _parse_image(image) -> np.ndarray:
     return image
 
 
+def _normalized_to_gecko(norm_pos):
+    """
+    Transforms [0.0, 1.0] to [-0.17, 0.05]
+    """
+    return (0.22 * norm_pos) - 0.17
+
+def _gecko_to_normalized(gecko_pos):
+    """
+    Transforms [-0.17, 0.05] to [0.0, 1.0]
+    """
+    return (gecko_pos + 0.17) / 0.22
+
 @dataclasses.dataclass(frozen=True)
 class WamInputs(transforms.DataTransformFn):
     """
@@ -43,11 +54,8 @@ class WamInputs(transforms.DataTransformFn):
         base_image = _parse_image(data["observation/image"])
         wrist_image = _parse_image(data["observation/wrist_image"])
 
-        # TODO: map gripper to this range
-        # Gripper positions are in [0.0, 1.0], with 0.0 corresponding to fully open and 1.0 corresponding to fully closed."
-        #
-
         # Create inputs dict. Do not change the keys in the dict below.
+        data["observation/state"][7] = _gecko_to_normalized(data["observation/state"][7])
         inputs = {
             "state": data["observation/state"],
             "image": {
@@ -68,9 +76,11 @@ class WamInputs(transforms.DataTransformFn):
             },
         }
 
+
         # Pad actions to the model action dimension. Keep this for your own dataset.
         # Actions are only available during training.
         if "actions" in data:
+            data["actions"][7] = _gecko_to_normalized(data["actions"][7])
             inputs["actions"] = data["actions"]
 
         # Pass the prompt (aka language instruction) to the model.
@@ -92,4 +102,5 @@ class WamOutputs(transforms.DataTransformFn):
     """
 
     def __call__(self, data: dict) -> dict:
+        data["actions"][:, 7] = _normalized_to_gecko(data["actions"][:, 7])
         return {"actions": np.asarray(data["actions"][:, :8])}
