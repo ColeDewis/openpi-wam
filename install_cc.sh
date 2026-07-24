@@ -47,8 +47,5 @@ sed -i 's|orbax-checkpoint==0.11.13|orbax-checkpoint==0.11.6|g' pyproject.toml
 sed -i 's|opencv-python==4.11.0.86|opencv-python==4.11.0|g' pyproject.toml
 pip install -e .
 
-# remove sed comand once cc updates jaxtyping wheels
-sed -i 's/^import warnings$/import warnings\nimport re/' \
-    ${VENV_DIR}/lib/python3.11/site-packages/jaxtyping/__init__.py
 pip install --no-index pytest
 

@@ -1,14 +1,40 @@
 # extra notes
 if not using cc install with ```uv pip install -e ".[recording]"```
 
-# running in cc
-```
-python -m wam.training.pull_lerobot
+common commands:
+```bash
 python3 scripts/compute_norm_stats.py --config-name haptic_wam_pi05
 python3 scripts/train.py haptic_wam_pi05 --exp-name=haptic_wam_pi05
-
 ```
-for interactive do
+
+# Compute Canada Install
+The following script will create a virtual env in your home directory `~/PI_ENV` and install the required packages.
+```bash
+./install_cc.sh
+```
+
+Once installed, confirm that the user configuration is correct in `init_cc.sh`. The env can be initialized with
+```bash
+source cc_init.sh
+```
+
+# running in cc
+For offline runs, model weights can be downloaded on a login node using:
+```bash
+python scripts/download_weights.py <config_name>
+```
+
+To download the huggingface dataset to a .tar use:
+```bash
+python -m wam.training.pull_lerobot
+```
+
+Job scripts can be found in `job_scripts/`. Example to schedule a job:
+```bash
+sbatch job_scipts/pi05_job.sh
+```
+
+For interactive use:
 ```bash
 salloc --time=1:30:0 --cpus-per-task=8 --gres=gpu:h100:1 --mem=16G --nodes=1 --account=def-jag
 srun --jobid <jobid> --pty bash
