@@ -11,7 +11,7 @@ from openpi.training.data_loader import TransformedDataset, create_torch_dataset
 if __name__ == "__main__":
 
     config = _config.get_config("haptic_wam_pi05")
-    config = dataclasses.replace(config, batch_size=10)
+    config = dataclasses.replace(config, batch_size=1)
     checkpoint_dir = Path(
         "/mnt/10tb/dyanmiller/openpi-wam/checkpoints/haptic_wam_pi05/haptic_wam_pi05/29999"
     )
@@ -19,9 +19,6 @@ if __name__ == "__main__":
     # Create a trained policy.
     policy = _policy_config.create_trained_policy(config, checkpoint_dir)
 
-    dataset = lerobot_dataset.LeRobotDataset(
-        config.data.repo_id,
-    )
     data_config = config.data.create(config.assets_dirs, config.model)
     dataset = create_torch_dataset(
         data_config, config.model.action_horizon, config.model
@@ -35,9 +32,10 @@ if __name__ == "__main__":
     )
 
 
-    i = 0
-    while i < 200:
+    i = 5000
+    while i < len(dataset):
         example = dataset[i]
+        before = example["observation/state"].clone()
 
         result = policy.infer(example)
         n_jnts = result["actions"].shape[1]
@@ -52,7 +50,7 @@ if __name__ == "__main__":
 
             # Plot to the axis
             ax.plot(result["actions"][:, jnt_idx], label="actions")
-            ax.scatter(0, example["observation/state"][jnt_idx].numpy(), label="last_obs")
+            ax.scatter(0, before[jnt_idx].numpy(), label="last_obs")
             ax.set_title(f"Joint {jnt_idx}")
             ax.legend()
 

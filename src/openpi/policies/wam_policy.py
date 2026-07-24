@@ -55,9 +55,11 @@ class WamInputs(transforms.DataTransformFn):
         wrist_image = _parse_image(data["observation/wrist_image"])
 
         # Create inputs dict. Do not change the keys in the dict below.
-        data["observation/state"][7] = _gecko_to_normalized(data["observation/state"][7])
+        state = np.asarray(data["observation/state"])
+        gripper_idx= 7
+        state[gripper_idx] = _gecko_to_normalized(state[gripper_idx])
         inputs = {
-            "state": data["observation/state"],
+            "state": state,
             "image": {
                 "base_0_rgb": base_image,
                 "left_wrist_0_rgb": wrist_image,
@@ -80,7 +82,7 @@ class WamInputs(transforms.DataTransformFn):
         # Pad actions to the model action dimension. Keep this for your own dataset.
         # Actions are only available during training.
         if "actions" in data:
-            data["actions"][7] = _gecko_to_normalized(data["actions"][7])
+            data["actions"][:, gripper_idx] = _gecko_to_normalized(data["actions"][:, gripper_idx])
             inputs["actions"] = data["actions"]
 
         # Pass the prompt (aka language instruction) to the model.
@@ -102,5 +104,6 @@ class WamOutputs(transforms.DataTransformFn):
     """
 
     def __call__(self, data: dict) -> dict:
-        data["actions"][:, 7] = _normalized_to_gecko(data["actions"][:, 7])
+        gripper_idx= 7
+        data["actions"][:, gripper_idx] = _normalized_to_gecko(data["actions"][:, gripper_idx])
         return {"actions": np.asarray(data["actions"][:, :8])}
