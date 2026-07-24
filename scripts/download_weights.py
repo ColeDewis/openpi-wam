@@ -13,4 +13,7 @@ def main(config: _config.TrainConfig):
 
 
 if __name__ == "__main__":
+    for config in _config._CONFIGS_DICT.values():
+        config.exp_name = "dummy_exp"
+
     main(_config.cli())
