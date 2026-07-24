@@ -16,7 +16,7 @@ def main(
 
     print(f"Packing to {tar_path} ...")
     with tarfile.open(tar_path, "w") as tar:
-        tar.add(local_path, arcname=local_path.name)
+        tar.add(local_path)
     size_mb = Path(tar_path).stat().st_size / (1024 ** 2)
 
     print(f"Done. {tar_path} ({size_mb:.1f} MB)")
