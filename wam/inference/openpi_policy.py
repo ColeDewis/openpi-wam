@@ -185,7 +185,7 @@ class OpenPIPolicy:
                 "observation/state": np.concatenate(
                     [robot_state["follower_jp"], [robot_state["gripper_pos"]]]
                 ),
-                "prompt": "reach for the red solo cup",
+                "prompt": "pick up and place the red solo cup",
             }
 
         else:
