@@ -5,7 +5,7 @@ import numpy as np
 
 
 class TeleopUDPHandler:
-    def __init__(self, remote_ip, send_port, DOF=7, horizon=5):
+    def __init__(self, remote_ip, send_port, DOF=7, horizon=8):
         """
         :param remote_ip: IP address of the target (e.g., '127.0.0.1')
         :param send_port: The port the target is listening on.
@@ -26,7 +26,6 @@ class TeleopUDPHandler:
             self.horizon * self.action_size * 8
         )
 
-        # 1. Sender Socket (Always created)
         self.sock_send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         self.sock_send.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
@@ -62,3 +61,4 @@ class TeleopUDPHandler:
     def close(self):
         if self.sock_send: 
             self.sock_send.close()
+
