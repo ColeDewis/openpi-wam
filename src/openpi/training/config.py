@@ -940,22 +940,21 @@ _CONFIGS = [
     TrainConfig(
         name="haptic_wam_pi05_freeze",
         resume=True,
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, paligemma_variant="gemma_2b_lora"),
         assets_base_dir=os.getenv("OPENPI_ASSETS_DIR", "./assets/"),
         checkpoint_base_dir=os.getenv("OPENPI_CHECKPOINTS_DIR", "./checkpoints/"),
         data=LeRobotWamDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
         ),
-        freeze_filter= pi0_config.Pi0Config(pi05=True, action_horizon=10,
-             paligemma_variant="gemma_2b_lora",
-             action_expert_variant="gemma_300m_lora"
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         wandb_enabled=False,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        ema_decay=None,
+        # NOTE: Using default ema since action expert is fully trainable. Expect it to be highly inefficient for VRAM (ie loading and updating the full model). Modification on the training loop could fix this.
+        # ema_decay=None,
     ),
-
     #
     # Fine-tuning Aloha configs.
     #
@@ -1163,7 +1162,6 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
-    
     # Configs from Jun's lab for training:
     # Will probably have to do this on the 3090 to have enough VRAM.
     TrainConfig(
@@ -1191,7 +1189,6 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
-
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1200,
             peak_lr=2e-5,
