@@ -948,7 +948,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
         ),
         freeze_filter=pi0_config.Pi0Config(
-            pi05=True, action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+            pi05=True, action_horizon=10, paligemma_variant="gemma_2b_lora"
         ).get_freeze_filter(),
         wandb_enabled=False,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
