@@ -34,6 +34,25 @@ class Pi0Config(_model.BaseModelConfig):
 
     pytorch_compile_mode: str | None = "max-autotune"
 
+    # RL Token (RLT, arXiv 2604.23073) config.
+    rlt_enabled: bool = False
+    rlt_only: bool = False  # if True, skip action loss and only train RLT (VLM frozen)
+    rlt_zrl_dim: int = 2048  # RL token dimension (paper: 1x2048)
+    # Encoder/decoder residual-stream width. The paper's Fig. 2 runs the tokenizer at
+    # the VLA embedding width (N x 2048 in, 1 x 2048 out), so the ONLY compression is
+    # the sequence M -> 1; the channel count never shrinks. Keep this == the PaliGemma
+    # width (2048) unless you deliberately want a channel bottleneck as well.
+    # WARNING: at width < zrl_dim the readout `zrl_proj: Linear(width -> zrl_dim)` is an
+    # up-projection, so z_rl spans only a `width`-dimensional subspace of R^zrl_dim — a
+    # nominal 2048-d token with `width` real degrees of freedom. Older checkpoints were
+    # trained at 512 and must pass rlt_width=512 explicitly to load.
+    rlt_width: int = 2048
+    rlt_enc_depth: int = 3
+    rlt_dec_depth: int = 3
+    rlt_num_heads: int = 8
+    rlt_num_input_cameras: int = 2  # base_0_rgb + left_wrist_0_rgb -> M = 2*256 tokens
+    rlt_normalize_targets: bool = True  # per-token RMS-normalize reconstruction targets
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)

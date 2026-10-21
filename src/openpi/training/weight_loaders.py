@@ -46,12 +46,16 @@ class CheckpointWeightLoader(WeightLoader):
     """
 
     params_path: str
+    # Regex for keys missing from the checkpoint that should be filled from the
+    # randomly-initialized model. Defaults to LoRA weights only. Use ".*rlt.*" when
+    # loading a base checkpoint into a model that has new RL-token parameters.
+    missing_regex: str = ".*lora.*"
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
         # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        return _merge_params(loaded_params, params, missing_regex=self.missing_regex)
 
 
 @dataclasses.dataclass(frozen=True)

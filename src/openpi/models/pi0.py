@@ -99,6 +99,27 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # RL Token (RLT)
+        if config.rlt_enabled:
+            from openpi.models.rl_token import RLTokenizer
+
+            self.rlt = RLTokenizer(
+                feature_dim=paligemma_config.width,
+                zrl_dim=config.rlt_zrl_dim,
+                width=config.rlt_width,
+                enc_depth=config.rlt_enc_depth,
+                dec_depth=config.rlt_dec_depth,
+                num_heads=config.rlt_num_heads,
+                num_tokens=config.rlt_num_input_cameras * 256,
+                normalize_targets=config.rlt_normalize_targets,
+                rngs=rngs,
+            )
+            self._rlt_num_image_tokens = config.rlt_num_input_cameras * 256
+        else:
+            self.rlt = None
+            self._rlt_num_image_tokens = 0
+        self._rlt_only = config.rlt_only
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
@@ -185,12 +206,36 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.array(ar_mask)
         return tokens, input_mask, ar_mask, adarms_cond
 
+    # https://github.com/arya-ebrahimi/layered-value-forecasts/blob/778f31b77b03fc0e145fab844b74d480a4913a8d/src/openpi/models/pi0.py#L226
+    def _run_prefix_out(
+        self, observation: _model.Observation
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"]]:
+        """Run the prefix-only VLM forward pass and return per-token outputs + mask."""
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        (prefix_out, _), _ = self.PaliGemma.llm([prefix_tokens, None], mask=attn_mask, positions=positions)
+        return prefix_out, prefix_mask
+
+    def _rlt_tokens(self, observation: _model.Observation) -> at.Float[at.Array, "b m f"]:
+        """Frozen-VLM image-token embeddings z_1:M that g_phi reads, in f32."""
+        prefix_out, _ = self._run_prefix_out(observation)
+        return prefix_out[:, : self._rlt_num_image_tokens].astype(jnp.float32)
+
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+
+        if self._rlt_only:
+            # RLT-only mode: prefix-only forward pass; reconstruction loss on the
+            # image-token embeddings (language tokens dropped — fixed instruction).
+            rlt_loss = self.rlt.compute_rlt_loss(self._rlt_tokens(observation))
+            batch_shape = actions.shape[:-2]
+            return jnp.broadcast_to(rlt_loss, batch_shape + (self.action_horizon,))
+
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)

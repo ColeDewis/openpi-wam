@@ -106,19 +106,19 @@ def main(config_name: str, max_frames: int | None = None):
     for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
         count += 1
         for key in keys:
-            if key == "actions":
-                print(batch[key])
+            # if key == "actions":
+                # print(batch[key])
             stats[key].update(np.asarray(batch[key]))
 
-    print(count)
+    # print(count)
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
-    print("\n\n\n\n\nTH#ESE _ARE THE NORMA STATS\n\n\n\n")
-    print(norm_stats)
-    print("\n\n\n\n\n\n\n\n\n")
+    # print("\n\n\n\n\nTH#ESE _ARE THE NORMA STATS\n\n\n\n")
+    # print(norm_stats)
+    # print("\n\n\n\n\n\n\n\n\n")
 
     output_path = config.assets_dirs / data_config.repo_id
-    print(f"Writing stats to: {output_path}")
+    # print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 
 

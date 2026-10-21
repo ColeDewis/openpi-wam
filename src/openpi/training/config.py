@@ -288,6 +288,13 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
     extra_delta_transform: bool = False
 
+    # Optional LIBERO suite filter. One of: "libero_10", "libero_goal", "libero_object",
+    # "libero_spatial", "all". When set, only episodes from that suite are loaded. None = all 40 tasks.
+    libero_suite: str | None = None
+    # Optional explicit task filter (global 0-39 indices). Takes precedence over libero_suite.
+    # Use for single-task training (e.g. the RLT per-task demo dataset).
+    libero_task_indices: tuple[int, ...] | None = None
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # The repack transform is *only* applied to the data coming from the dataset,
@@ -735,17 +742,26 @@ _CONFIGS = [
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,
     ),
+    # https://github.com/arya-ebrahimi/layered-value-forecasts/blob/main/src/openpi/training/config.py
     TrainConfig(
         name="pi05_libero",
-        model=pi0_config.Pi0Config(action_horizon=15, pi05=True),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
+            base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
     TrainConfig(
@@ -849,7 +865,8 @@ _CONFIGS = [
         assets_base_dir="/home/serg/projects/openpi-wam/assets/",
         # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
         # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
-        checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
+        # checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
+        checkpoint_base_dir="/home/serg/projects/openpi-wam/checkpoints/",
         data=LeRobotLiberoDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
@@ -877,7 +894,8 @@ _CONFIGS = [
         assets_base_dir="/home/serg/projects/openpi-wam/assets/",
         # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
         # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
-        checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
+        # checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
+        checkpoint_base_dir="/home/serg/projects/openpi-wam/checkpoints/",
         data=LeRobotLiberoDataConfig(
             repo_id="Breakdancingbear/wam_teleop_dataset",
             base_config=DataConfig(prompt_from_task=True),
@@ -968,6 +986,59 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
+    TrainConfig(
+        name="rlt_wam_pi05",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ),
+        # assets_base_dir="/home/serg/projects/openpi-wam/assets/",
+        # assets_base_dir="/project/def-jag/serg/openpi-wam/assets/",
+        # checkpoint_base_dir="/home/serg/scratch/openpi-wam/checkpoints/",
+        # checkpoint_base_dir="/scratch/serg/openpi-wam/checkpoints/",
+        # checkpoint_base_dir="/home/serg/projects/openpi-wam/checkpoints/",
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(
+                # assets_dir="checkpoints/pi05_libero_base/assets",
+                assets_dir="/home/serg/projects/openpi-wam/assets/rlt_wam_pi05",
+                asset_id="physical-intelligence/libero",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            libero_suite="libero_goal",
+            libero_task_indices=None,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/pi05_base/params",
+            missing_regex=".*rlt.*",
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ).get_freeze_filter(),
+        wandb_enabled=False,
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=10_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        num_train_steps=10_000,
+        save_interval=3000,
+        keep_period=1000,
+        log_interval=30,
+        ema_decay=None,
+    ),
+
     #
     # Fine-tuning Aloha configs.
     #
