@@ -14,6 +14,14 @@ salloc --time=1:30:0 --ntasks=8 --gres=gpu:h100:1 --mem=16G --nodes=1
 srun --jobid <jobid> --pty bash
 ```
 
+| Pipeline | Entry point | Data | Where it runs |
+|---|---|---|---|
+| **VLA SFT** (OpenPI π0.5) | `scripts/train.py --config-name <config>` | LeRobot datasets (`repo_id`) | GPU box |
+| **VLA real-robot inference** | `wam/inference/main.py --policy openpi` | Live FLIR + UDP WAM packets; HDF5 with `--record` | Robot PC |
+| **RLT** (RL token) | Stage 1: `scripts/train.py --config-name rlt_wam_pi05`; Stage 2: `scripts/train_rlt.py` | LIBERO / LeRobot | GPU box (LIBERO uses EGL subprocess envs) |
+| **RLPD / HG-Dagger** (new) | `scripts/train_rlpd.py` or `scripts/train_hgdagger.py` + `main.py --policy hilserl` | Live transition pickles under `online/` and `demo/` | Learner on GPU box, actor on robot PC |
+| **LIBERO VLA eval** | `scripts/serve_policy.py --env LIBERO` + `examples/libero/main.py` | LIBERO sim | Policy server on GPU box, sim client on laptop |
+
 # openpi
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).

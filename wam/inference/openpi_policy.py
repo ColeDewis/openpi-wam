@@ -20,7 +20,21 @@ WAM_TORQUE_LIMIT =  5
  
 KP_POS = 300   # N/m
 KP_ROT = 5   # N·m/rad
- 
+
+# Home orientation used to express the WAM end-effector as a rotvec.
+HOME_QUAT = np.array(
+    [0.8311519102829725, 0.0005888003896006177, -0.556030721230029, -0.003999049322114239]
+)
+
+
+def quat_to_rotvec(quat: np.ndarray) -> np.ndarray:
+    """Rotation vector of ``quat`` relative to the WAM home orientation."""
+    quat_xyzw = np.roll(quat, -1, axis=-1)
+    ref_xyzw = np.roll(HOME_QUAT, -1, axis=-1)
+    r = R.from_quat(ref_xyzw).inv() * R.from_quat(quat_xyzw)
+    return r.as_rotvec()
+
+
 def _rotvec_delta_to_rot_error(delta_rotvec: np.ndarray) -> np.ndarray:
     """
     Convert an incremental euler-XYZ delta (radians, EE frame) to a rotation
@@ -133,10 +147,7 @@ class OpenPIPolicy:
 
     def quat_to_rotvec(self, quat):
         """compute state angle as a rotvec based on the home quat"""
-        quat_xyzw = np.roll(quat, -1, axis=-1)
-        ref_xyzw = np.roll(np.array([0.8311519102829725, 0.0005888003896006177, -0.556030721230029, -0.003999049322114239]), -1 , axis=-1) # home quat
-        r = R.from_quat(ref_xyzw).inv() * R.from_quat(quat_xyzw)
-        return r.as_rotvec()
+        return quat_to_rotvec(quat)
 
 
     def _model_inference(self, front_image, wrist_image, robot_state):

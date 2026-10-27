@@ -1155,4 +1155,4 @@ class RealRobotEnvWorker:
         return pool
 
     def close(self) -> None:
-        T
+        pass  # channels/servers are owned by whoever constructed them (see train script)

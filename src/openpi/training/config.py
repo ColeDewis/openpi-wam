@@ -1039,6 +1039,156 @@ _CONFIGS = [
         ema_decay=None,
     ),
 
+    # ── RLT stage 1: train the RL-token encoder-decoder on frozen VLA prefixes ──
+    # Mirrors layered-value-forecasts: only the `rlt` subtree trains, and the
+    # tokenizer must be retrained whenever the VLA checkpoint changes. Stage 2
+    # (online TD3 on the frozen token) is scripts/train_rlt.py.
+    #
+    # pi05_rlt_only_libero_base needs the stock LIBERO checkpoint mirrored once:
+    #   uv run python -c "import gcsfs; fs=gcsfs.GCSFileSystem(token='anon'); \
+    #     fs.get('openpi-assets/checkpoints/pi05_libero', 'checkpoints/pi05_libero_base', recursive=True)"
+    TrainConfig(
+        name="pi05_rlt_only_libero_base",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(
+                assets_dir="checkpoints/pi05_libero_base/assets",
+                asset_id="physical-intelligence/libero",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            libero_suite="libero_goal",
+            libero_task_indices=None,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/pi05_libero_base/params",
+            missing_regex=".*rlt.*",
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ).get_freeze_filter(),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=10_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        num_train_steps=10_000,
+        save_interval=2000,
+        keep_period=2000,
+        log_interval=30,
+        ema_decay=None,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi05_rlt_only_libero",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(
+                assets_dir="checkpoints/29999_merged_sft/assets",
+                asset_id="physical-intelligence/libero",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            libero_suite="libero_10",
+            libero_task_indices=None,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/29999_merged_sft/params",
+            missing_regex=".*rlt.*",
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ).get_freeze_filter(),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=10_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        num_train_steps=10_000,
+        save_interval=2000,
+        keep_period=2000,
+        log_interval=30,
+        ema_decay=None,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        # Runnable with the checkpoints already in this workspace: the base
+        # pi05 params plus the local LIBERO norm stats. Use this for a stage-1
+        # smoke test; mirror pi05_libero_base for the paper-aligned run.
+        name="pi05_rlt_only_libero_local",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(
+                assets_dir="assets/rlt_wam_pi05",
+                asset_id="physical-intelligence/libero",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            libero_suite="libero_goal",
+            libero_task_indices=None,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/pi05_base/params",
+            missing_regex=".*rlt.*",
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            rlt_enabled=True,
+            rlt_only=True,
+        ).get_freeze_filter(),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            decay_steps=10_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        num_train_steps=10_000,
+        save_interval=2000,
+        keep_period=2000,
+        log_interval=30,
+        ema_decay=None,
+        wandb_enabled=False,
+    ),
+
     #
     # Fine-tuning Aloha configs.
     #
@@ -1246,7 +1396,7 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
-    
+
     # Configs from Jun's lab for training:
     # Will probably have to do this on the 3090 to have enough VRAM.
     TrainConfig(
