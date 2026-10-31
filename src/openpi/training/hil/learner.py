@@ -1,9 +1,8 @@
 """Shared learner loop for RLPD (SAC) and HG-Dagger (BC).
 
-The two upstream scripts differ only in which buffers they sample and whether
-they run a BC pretraining phase; everything else (agent construction, the
-file-based actor handoff, checkpointing) is shared here. Keeping the algorithm
-structure in one place makes the two entry points thin and readable:
+The actor writes transition pickles under ``data_dir`` (``online/`` and
+``demo/``); this loop tails them, trains, and checkpoints. The two entry points
+are thin wrappers:
 
     scripts/train_rlpd.py      -> run(..., algorithm="rlpd")
     scripts/train_hgdagger.py  -> run(..., algorithm="hgdagger")
@@ -23,9 +22,9 @@ from openpi.training.hil import encoders as _encoders
 from openpi.training.hil import transitions as _transitions
 from serl_launcher.utils.train_utils import concat_batches
 
-# Networks updated per step. RLPD follows hil-serl's CTA schedule: ``cta_ratio-1``
-# critic-only updates, then one update that also moves the actor and temperature.
-# The DQN gripper ("grasp_critic") trains on every step, like hil-serl's hybrid example.
+# RLPD follows hil-serl's CTA schedule: ``cta_ratio-1`` critic-only updates,
+# then one update that also moves the actor and temperature. The DQN gripper
+# (``grasp_critic``) trains on every step.
 CRITIC_ONLY = frozenset({"critic", "grasp_critic"})
 FULL_UPDATE = frozenset({"critic", "grasp_critic", "actor", "temperature"})
 
@@ -44,15 +43,15 @@ class LearnerConfig:
     seed: int = 42
     action_dim: int = 7
 
-    # Data / optimization. Defaults mirror hil-serl's examples.
+    # Defaults mirror hil-serl's DefaultTrainingConfig.
     batch_size: int = 256
-    cta_ratio: int = 5
+    cta_ratio: int = 2
     discount: float = 0.97
     soft_target_update_rate: float = 0.005
     reward_bias: float = 0.0
     target_entropy: float | None = None
 
-    training_starts: int = 1_000
+    training_starts: int = 100
     max_steps: int = 100_000
     replay_buffer_capacity: int = 200_000
     pretrain_steps: int = 20_000
@@ -61,13 +60,12 @@ class LearnerConfig:
     log_interval: int = 100
     checkpoint_period: int = 5_000
     keep: int = 20
-    resume: bool = False
 
     def __post_init__(self):
         if not self.data_dir:
-            raise ValueError("--data_dir is required (it is written by wam/inference/main.py)")
+            raise ValueError("--data-dir is required (it is written by wam/inference/main.py)")
         if not self.checkpoint_dir:
-            raise ValueError("--checkpoint_dir is required")
+            raise ValueError("--checkpoint-dir is required")
         if self.algorithm not in ("rlpd", "hgdagger"):
             raise ValueError(f"algorithm must be 'rlpd' or 'hgdagger', got {self.algorithm!r}")
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
@@ -96,28 +94,15 @@ def save_run_config(cfg: LearnerConfig) -> None:
     (Path(cfg.checkpoint_dir) / "config.json").write_text(json.dumps(payload, indent=2))
 
 
-def _restore_if_requested(cfg: LearnerConfig, agent):
-    if not cfg.resume:
-        return agent, 0
-    latest = checkpoints.latest_checkpoint(cfg.checkpoint_dir)
-    if latest is None:
-        return agent, 0
-    state = checkpoints.restore_checkpoint(latest, target=agent.state)
-    step = int(Path(latest).name.rsplit("_", 1)[-1])
-    print(f"restored agent from {latest} (step {step})")
-    return agent.replace(state=state), step
-
-
 def save_agent_checkpoint(cfg: LearnerConfig, agent, step: int) -> None:
-    # The main loop can land on the same step as the final save (and a resume
-    # re-enters at an existing step); saving twice would raise.
+    # The main loop can land on the same step as the final save.
     if (Path(cfg.checkpoint_dir) / f"checkpoint_{step}").exists():
         return
     checkpoints.save_checkpoint(cfg.checkpoint_dir, agent.state, step=step, keep=cfg.keep)
 
 
 def sample_buffer(buffer, batch_size: int):
-    # The pixel path stores ``num_stack + 1`` frames per sample; the low-dim
+    # The pixel path stores ``num_stack + 1`` frames per sample; low-dim
     # buffers have no pixel keys and therefore no packing option.
     if hasattr(buffer, "pixel_keys"):
         return buffer.sample(batch_size, pack_obs_and_next_obs=True)
@@ -158,11 +143,17 @@ def run(cfg: LearnerConfig) -> None:
     """Train one agent from the pickles under ``cfg.data_dir``."""
     save_run_config(cfg)
     agent = _agent_from_config(cfg)
-    agent, start_step = _restore_if_requested(cfg, agent)
-    if checkpoints.latest_checkpoint(cfg.checkpoint_dir) is None:
-        # Publish the initial (randomly initialized) network so the actor can
-        # start its first episode immediately, matching hil-serl's
-        # `server.publish_network(agent.state.params)` before the buffer fills.
+
+    # Always resume from the latest checkpoint, if there is one.
+    latest = checkpoints.latest_checkpoint(cfg.checkpoint_dir)
+    if latest is not None:
+        state = checkpoints.restore_checkpoint(latest, target=agent.state)
+        agent = agent.replace(state=state)
+        step = int(Path(latest).name.rsplit("_", 1)[-1])
+        print(f"restored agent from {latest} (step {step})")
+    else:
+        step = 0
+        # Publish the initial network so the actor can start immediately.
         save_agent_checkpoint(cfg, agent, 0)
 
     online = (
@@ -175,27 +166,22 @@ def run(cfg: LearnerConfig) -> None:
     _sync(cfg, seen, online, demo)
     print(f"loaded transitions: online={len(online) if online is not None else 0} demo={len(demo)}")
 
-    # ── HG-Dagger: BC pretraining on the initial intervention set ────────────
-    step = start_step
+    # HG-Dagger: BC pretraining on the initial intervention set.
     if cfg.algorithm == "hgdagger" and cfg.pretrain_steps > 0 and step == 0:
+        while len(demo) == 0:
+            time.sleep(cfg.poll_interval)
+            _sync(cfg, seen, online, demo)
         pbar = tqdm.tqdm(range(cfg.pretrain_steps), desc="bc_pretraining", dynamic_ncols=True)
         for _ in pbar:
-            if len(demo) == 0:
-                # No interventions yet: wait for the operator instead of
-                # spinning on an empty buffer.
-                time.sleep(cfg.poll_interval)
-                _sync(cfg, seen, online, demo)
-                continue
             agent, info = agent.update(sample_buffer(demo, cfg.batch_size))
             step += 1
-            if step % cfg.log_interval == 0:
+            if cfg.log_interval > 0 and step % cfg.log_interval == 0:
                 pbar.set_postfix({k: f"{float(v):.4f}" for k, v in flatten_info(info).items()})
-            if step % cfg.checkpoint_period == 0:
+            if cfg.checkpoint_period > 0 and step % cfg.checkpoint_period == 0:
                 save_agent_checkpoint(cfg, agent, step)
         save_agent_checkpoint(cfg, agent, step)
         print(f"BC pretraining done ({step} steps)")
 
-    # ── main loop ────────────────────────────────────────────────────────────
     pbar = tqdm.tqdm(total=cfg.max_steps, initial=step, desc="learner", dynamic_ncols=True)
     last_sync = 0.0
     while step < cfg.max_steps:
@@ -222,8 +208,10 @@ def run(cfg: LearnerConfig) -> None:
                     networks_to_update=CRITIC_ONLY,
                 )
                 step += 1
-            batch = mixed_batch(online, demo, cfg.batch_size)
-            agent, info = agent.update(batch, networks_to_update=FULL_UPDATE)
+            agent, info = agent.update(
+                mixed_batch(online, demo, cfg.batch_size),
+                networks_to_update=FULL_UPDATE,
+            )
         else:
             if len(demo) == 0:
                 time.sleep(cfg.poll_interval)
@@ -236,9 +224,9 @@ def run(cfg: LearnerConfig) -> None:
         pbar.update(n_this_iter)
         flat = flatten_info(info)
         pbar.set_postfix({k: f"{float(v):.3f}" for k, v in flat.items()})
-        if step % cfg.log_interval == 0:
+        if cfg.log_interval > 0 and step % cfg.log_interval == 0:
             pbar.write(f"[step {step}] " + " ".join(f"{k}={float(v):.4f}" for k, v in sorted(flat.items())))
-        if step % cfg.checkpoint_period == 0:
+        if cfg.checkpoint_period > 0 and step % cfg.checkpoint_period == 0:
             save_agent_checkpoint(cfg, agent, step)
 
     save_agent_checkpoint(cfg, agent, step)

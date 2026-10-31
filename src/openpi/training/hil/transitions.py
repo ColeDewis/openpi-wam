@@ -1,9 +1,6 @@
-"""On-disk transition handoff between the actor (``wam/inference/main.py``) and
-the RLPD / HG-Dagger learners.
+"""On-disk transition handoff between the actor and the RLPD / HG-Dagger learners.
 
-hil-serl writes transition pickles and lets the learner read them; this module
-keeps that format and adds the small amount of bookkeeping needed to tail a
-directory. A transition is a plain dict:
+A transition is a plain dict:
 
     observations      dict, encoder-convention observation at step t
     actions           [action_dim] float32, normalized to [-1, 1]
@@ -12,8 +9,7 @@ directory. A transition is a plain dict:
     masks             float32, 1 - dones
     dones             bool
     intervened        bool, True when a human takeover produced the action
-    grasp_penalty     float32, <= 0 reward shaping for the gripper DQN only (a toggle of the
-                      commanded gripper state); 0.0 when the actor does not compute it
+    grasp_penalty     float32, <= 0 reward shaping for the gripper DQN only
 
 Directories:
     <root>/online   every transition (RLPD's online buffer)
@@ -30,17 +26,6 @@ import time
 
 import numpy as np
 
-TRANSITION_FIELDS = (
-    "observations",
-    "actions",
-    "next_observations",
-    "rewards",
-    "masks",
-    "dones",
-    "intervened",
-    "grasp_penalty",
-)
-
 
 def make_transition(observations, actions, next_observations, reward, done, intervened, grasp_penalty=0.0):
     return {
@@ -55,39 +40,19 @@ def make_transition(observations, actions, next_observations, reward, done, inte
     }
 
 
-def _new_pickle_path(directory: Path) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    # Unique even when two flushes land in the same clock tick.
-    name = f"transitions_{time.time_ns()}_{os.getpid()}.pkl"
-    return directory / name
-
-
 def save_transitions(directory: Path | str, transitions: list[dict]) -> Path | None:
     if not transitions:
         return None
-    path = _new_pickle_path(Path(directory))
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"transitions_{time.time_ns()}_{os.getpid()}.pkl"
     with path.open("wb") as f:
         pkl.dump(transitions, f)
     return path
 
 
-def load_transitions(directory: Path | str) -> list[dict]:
-    directory = Path(directory)
-    if not directory.is_dir():
-        return []
-    out: list[dict] = []
-    for path in sorted(directory.glob("*.pkl")):
-        with path.open("rb") as f:
-            out.extend(pkl.load(f))
-    return out
-
-
 def sync_transitions(directory: Path | str, seen: set[str], data_store=None) -> int:
-    """Insert pickles not seen before into ``data_store`` (or just count them).
-
-    Returns the number of transitions added. ``seen`` is updated in place so a
-    learner can call this every iteration without re-reading old files.
-    """
+    """Insert pickles not seen before into ``data_store`` (or just count them)."""
     directory = Path(directory)
     if not directory.is_dir():
         return 0
@@ -108,26 +73,15 @@ def sync_transitions(directory: Path | str, seen: set[str], data_store=None) -> 
 class TransitionRecorder:
     """Accumulates one episode and flushes it as hil-serl transition pickles.
 
-    The actor loop calls ``add_step`` once per control step with the *encoder
-    convention* observation (the policy's ``encode`` output), the normalized
-    action that was actually executed, and whether a human intervened. The
-    next observation is filled in on the following step. ``flush`` closes the
+    The actor calls ``add_step`` once per control step with the encoder-convention
+    observation and the normalized action that was executed. ``flush`` closes the
     episode: the final transition carries the sparse success reward and
     ``done=True``.
     """
 
-    def __init__(
-        self,
-        root: Path | str,
-        algorithm: str,
-        *,
-        only_interventions: bool | None = None,
-    ):
+    def __init__(self, root: Path | str, algorithm: str):
         self.root = Path(root)
         self.algorithm = algorithm
-        if only_interventions is None:
-            only_interventions = algorithm == "hgdagger"
-        self.only_interventions = only_interventions
         self.reset()
 
     def reset(self) -> None:
@@ -167,7 +121,7 @@ class TransitionRecorder:
         if not transitions:
             return []
         written = []
-        if self.algorithm == "rlpd" and not self.only_interventions:
+        if self.algorithm == "rlpd":
             path = save_transitions(self.root / "online", transitions)
             if path is not None:
                 written.append(path)

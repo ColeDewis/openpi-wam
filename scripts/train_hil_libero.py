@@ -1,32 +1,29 @@
-"""Train RLPD or HG-Dagger in LIBERO, with keyboard interventions.
+"""Train RLPD or HG-Dagger in LIBERO with browser-gamepad interventions.
 
-The GPU box runs the simulator, agent, and learner. `--display` starts a
-headless-safe MJPEG stream plus a browser keyboard endpoint:
+Record demos first (pure teleop, one pickle per successful episode):
 
-    http://<gb10-ip>:8080/
+    uv run --extra libero scripts/train_hil_libero.py --record-demos 20 \
+        --demo-dir /home/serg/projects/openpi-wam/demos/goal_t1 --suite libero_goal --task-id 1
 
-Open that URL from the laptop, or tunnel it:
-    ssh -L 8080:localhost:8080 serg@promaxgb10-7c7f
+Then train. The latest checkpoint in ``--checkpoint-dir`` is restored
+automatically:
 
-Examples:
+    uv run --extra libero scripts/train_hil_libero.py \
+        --algorithm rlpd --suite libero_goal --task-id 1 \
+        --demo-dir /home/serg/projects/openpi-wam/demos/goal_t1 \
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_rlpd \
+        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/rlpd_goal_t1
 
-    # RLPD: policy rollouts fill `online`; arrow takeovers fill `demo`.
-    uv run scripts/train_hil_libero.py --algorithm rlpd \
-        --suite libero_goal --task-id 1 --display
+Open the printed URL in Chrome (tunnel it if the box is remote) and use the
+controller: OPTIONS starts an episode / marks success, SHARE marks failure,
+left stick moves x/y, triangle/cross moves z, L2/R2 opens/closes the gripper,
+and PS hands control back to the policy.
 
-    # HG-Dagger: only arrow takeovers fill the BC buffer.
-    uv run scripts/train_hil_libero.py --algorithm hgdagger \
-        --suite libero_goal --task-id 1 --display --pretrain-steps 2000
+Headless smoke test:
 
-Browser keys (and local pynput, if a display exists): R start/pause,
-S save(success), D discard(failure), arrows = Cartesian takeover
-(up/down=x, left/right=y), q/e=z, g=gripper.
-
-Headless smoke test (no live view, auto-start):
-    MUJOCO_GL=egl uv run scripts/train_hil_libero.py --algorithm rlpd \
-        --suite libero_goal --task-id 1 --keyboard none --no-display \
-        --max-episodes 1 --max-env-steps 40 --training-starts 20 \
-        --batch-size 8 --checkpoint-period 100
+    MUJOCO_GL=egl uv run --extra libero scripts/train_hil_libero.py \
+        --suite libero_goal --task-id 1 --no-display \
+        --max-episodes 1 --max-env-steps 40
 """
 
 import os

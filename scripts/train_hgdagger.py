@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
 """HG-Dagger on the WAM robot.
 
-Faithful port of hil-serl's ``examples/train_hgdagger.py``: BC on the human
-intervention dataset, with a BC pretraining phase followed by continued
-training as new interventions arrive. The actor side lives in
-``wam/inference/main.py`` (it writes the demo pickles); this is the learner.
-
-The observation encoder is selected with ``--encoder.kind``:
-
-    hilserl  -- the original hil-serl ResNet-10 path
-    rltoken  -- frozen VLAs RL token + proprio
-    timm     -- frozen torch/timm encoder + force/proprio
+BC on the human intervention dataset, with a BC pretraining phase followed by
+continued training as new interventions arrive. The actor side lives in
+``wam/inference/main.py`` and writes the demo pickles; this is the learner. The
+latest checkpoint in ``--checkpoint-dir`` is restored automatically.
 
 Example:
     uv run scripts/train_hgdagger.py \
         --data-dir ./interventions/book \
-        --checkpoint-dir ./checkpoints/hil/book_hgdagger \
-        --encoder.kind hilserl
+        --checkpoint-dir ./checkpoints/hil/book_hgdagger
 """
 
 from __future__ import annotations

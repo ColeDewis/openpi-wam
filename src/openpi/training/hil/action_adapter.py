@@ -1,7 +1,8 @@
-"""Map the agent's normalized 7-dim action to the environment's action space.
+"""Map the agent's normalized action to the environment's action space.
 
-The SAC/BC/HG-Dagger agents always operate on ``Box(-1, 1, (7,))``. What those
-seven numbers *mean* is robot-specific:
+The SAC/BC/HG-Dagger agents operate on ``Box(-1, 1, (action_dim,))``; LIBERO
+expects a 7-dim ``[dx, dy, dz, dax, day, daz, gripper]`` command. What those
+numbers *mean* is robot-specific:
 
     delta_pose   LIBERO / VLA convention: [dx, dy, dz, dax, day, daz, gripper].
                  LIBERO's OSC controller already applies its own metric scale,

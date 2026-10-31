@@ -366,7 +366,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         """
         batch_size = batch["rewards"].shape[0]
         chex.assert_tree_shape_prefix(batch, (batch_size,))
-        chex.assert_shape(batch["actions"], (batch_size, 7))
+        # Upstream hardcodes 7 here; any action_dim works (continuous dims + 1 discrete gripper),
+        # e.g. 4 for xyz + gripper.
+        chex.assert_shape(batch["actions"], (batch_size, None))
 
         if self.config["image_keys"][0] not in batch["next_observations"]:
             batch = _unpack(batch)
