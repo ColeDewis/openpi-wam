@@ -127,6 +127,18 @@ class Config:
     """Single LIBERO task (index within the suite)."""
     total_num_envs: int = 16
     max_episode_steps: int = 480
+    # Start-state perturbations from the LIBERO init states.  The EEF start is
+    # perturbed +-xyz; movable objects are perturbed +-xy only (z kept fixed so
+    # they stay on the table).  All movable objects are attempted, except
+    # non-primary ones inside a drawer/cabinet; primary obj_of_interest objects
+    # (the bowl in task 1) are always perturbed.  perturb_after_success_rate=0
+    # perturbs from the first rollout; >0 starts clean and enables perturbations
+    # once an eval exceeds that success rate (the >50% curriculum switch).
+    perturb_objects: bool = True
+    perturb_eef_xyz_m: float = 0.02
+    perturb_object_xy_m: float = 0.02
+    perturb_all_objects: bool = True
+    perturb_after_success_rate: float = 0.0
     action_chunk: int = 10
     """RL chunk length C (executed sub-steps per decision; model action_horizon >= C)."""
     action_env_dim: int = 7
@@ -475,6 +487,10 @@ class Config:
         if not self.output_dir:
             run = self.name or f"task{self.task_id}_b{self.bc_coef}"
             self.output_dir = f"checkpoints/rlt_{self.config_name}/{self.suite}/{run}"
+        if self.perturb_eef_xyz_m < 0.0 or self.perturb_object_xy_m < 0.0:
+            raise ValueError("perturbation magnitudes must be >= 0")
+        if not (0.0 <= self.perturb_after_success_rate <= 1.0):
+            raise ValueError("perturb_after_success_rate must be in [0, 1]")
 
     @property
     def task_ids(self) -> list[int]:
@@ -2340,6 +2356,18 @@ def main(cfg: Config) -> None:
                 f"[it {it}] EVAL rlt success={ev['success_rate']:.2f} n={ev['n']}" + (f" | {evstr}" if evstr else "")
             )
             _log_eval(output_dir, it, "rlt", ev, cfg)
+            threshold = float(cfg.perturb_after_success_rate)
+            if (
+                threshold > 0.0
+                and cfg.perturb_objects
+                and not env_worker.perturb_enabled
+                and float(ev["success_rate"]) > threshold
+            ):
+                env_worker.set_perturb(enabled=True)
+                logger.info(
+                    f"eval success {ev['success_rate']:.2f} > {threshold:.2f}: "
+                    "enabling EEF/object start-state perturbations"
+                )
         if cfg.save_interval > 0 and it % cfg.save_interval == 0:
             save_rlt_checkpoint(td3_state, output_dir, it, keep_last_n=cfg.keep_last_n, zrl_normalizer=zrl_normalizer)
 

@@ -76,6 +76,8 @@ from openpi.training.hil import encoders as _encoders
 from openpi.training.hil import learner as _learner
 from openpi.training.hil.action_adapter import ActionAdapter
 from openpi.training.hil.dmp import DmpBasePolicy
+from openpi.training.hil.dmp import combine_base_residual
+from openpi.training.hil.dmp import residual_from_final
 from openpi.training.hil.transitions import make_transition
 from openpi.training.hil.transitions import save_transitions
 from openpi.training.rlt import envs as _envs
@@ -551,6 +553,15 @@ class LiberoEnvConfig:
     action_chunk: int = 1
     action_env_dim: int = 7
     group_size: int = 1
+    # Start-state perturbations (LIBERO init-state access).  EEF gets +-xyz;
+    # objects get +-xy only so their z stays on the table.  All movable objects
+    # are attempted except non-primary ones inside a container; primary
+    # obj_of_interest objects are always perturbed.
+    perturb_objects: bool = True
+    perturb_eef_xyz_m: float = 0.02
+    perturb_object_xy_m: float = 0.02
+    perturb_all_objects: bool = True
+    perturb_after_success_rate: float = 0.0
 
     @property
     def task_ids(self) -> list[int]:
@@ -587,6 +598,32 @@ class SimConfig:
     base_policy: Literal["none", "dmp"] = "none"
     dmp_weights_per_dim: int = 20
     dmp_regularization: float = 0.0
+    dmp_gripper: bool = True
+    """Include the demonstrated gripper command as a DMP dimension.  Its base
+    action is the absolute normalized gripper target; the RL residual is added
+    on top with the same residual-driven weighting as the arm dims."""
+
+    # Base/residual composition.  The base action is scaled by
+    # ``1 - |residual| / residual_blend_scale`` per dimension (clipped to
+    # ``residual_min_base_weight``), then the residual is added.  A small
+    # residual therefore leaves the base in charge; a large residual suppresses
+    # it.  This is the sim stand-in for the real robot's ``policy_torque_scale``.
+    residual_blend_scale: float = 1.0
+    residual_min_base_weight: float = 0.0
+
+    # Start-state perturbations from the LIBERO init states.  The EEF start is
+    # perturbed +-xyz; movable objects are perturbed +-xy only, keeping z fixed
+    # so they stay on the table.  All movable objects are attempted except
+    # non-primary ones inside a container; primary ``obj_of_interest`` objects
+    # (the bowl in task 1) are always perturbed.
+    perturb_objects: bool = True
+    perturb_eef_xyz_m: float = 0.02
+    perturb_object_xy_m: float = 0.02
+    perturb_all_objects: bool = True
+    perturb_after_success_rate: float = 0.0
+    """0 = perturb from the first episode.  >0 = start unperturbed and enable
+    perturbations after an eval reports a success rate above this threshold
+    (the >50% curriculum switch)."""
 
     checkpoint_dir: str = "checkpoints/hil/libero"
     keep: int = 20
@@ -638,6 +675,14 @@ class SimConfig:
                 raise ValueError("dmp_weights_per_dim must be > 1")
             if self.dmp_regularization < 0.0:
                 raise ValueError("dmp_regularization must be >= 0")
+        if self.residual_blend_scale <= 0.0:
+            raise ValueError("residual_blend_scale must be positive")
+        if not (0.0 <= self.residual_min_base_weight <= 1.0):
+            raise ValueError("residual_min_base_weight must be in [0, 1]")
+        if self.perturb_eef_xyz_m < 0.0 or self.perturb_object_xy_m < 0.0:
+            raise ValueError("perturbation magnitudes must be >= 0")
+        if not (0.0 <= self.perturb_after_success_rate <= 1.0):
+            raise ValueError("perturb_after_success_rate must be in [0, 1]")
         if self.record_demos > 0 and not self.display:
             raise ValueError("--record-demos needs --display (the browser gamepad page)")
         if self.eval_after_episodes < 0 or self.eval_interval < 0:
@@ -706,7 +751,8 @@ class HilLiberoTrainer:
         self.act_adapter = ActionAdapter(kind="delta_pose", scales=tuple(float(x) for x in scales))
         self.operator = GamepadOperator(cfg.takeover_step, handback_s=cfg.handback_s, rotation=cfg.rotation)
         base_note = (
-            f" | base policy: DMP ({base_action_dim}-dim delta appended to proprio)"
+            f" | base policy: DMP ({base_action_dim}-dim base action appended to proprio, "
+            f"gripper={'modeled' if cfg.dmp_gripper else 'residual-only'})"
             if self.base_policy is not None
             else ""
         )
@@ -757,6 +803,11 @@ class HilLiberoTrainer:
             task_id=cfg.task_id,
             seed=cfg.seed,
             camera_size=cfg.image_size[0],
+            perturb_objects=cfg.perturb_objects,
+            perturb_eef_xyz_m=cfg.perturb_eef_xyz_m,
+            perturb_object_xy_m=cfg.perturb_object_xy_m,
+            perturb_all_objects=cfg.perturb_all_objects,
+            perturb_after_success_rate=cfg.perturb_after_success_rate,
         )
         self.env_worker = _envs.EnvWorker(
             env_cfg,
@@ -864,20 +915,34 @@ class HilLiberoTrainer:
         old_base_dim = old_encoder.get("base_action_dim")
         old_action = old.get("action_dim")
         old_base = old.get("base_policy", "none")
+        old_gripper = old.get("dmp_gripper")
+        old_blend = old.get("residual_blend_scale")
+        old_min_weight = old.get("residual_min_base_weight")
         if (
             (old_kind is not None and old_kind != self.cfg.encoder.kind)
             or (old_proprio is not None and int(old_proprio) != self.cfg.encoder.proprio_dim)
             or (old_base_dim is not None and int(old_base_dim) != self.cfg.encoder.base_action_dim)
             or (old_action is not None and int(old_action) != self.cfg.action_dim)
             or old_base != self.cfg.base_policy
+            or (old_gripper is not None and bool(old_gripper) != self.cfg.dmp_gripper)
+            or (old_blend is not None and abs(float(old_blend) - self.cfg.residual_blend_scale) > 1e-9)
+            or (
+                old_min_weight is not None
+                and abs(float(old_min_weight) - self.cfg.residual_min_base_weight) > 1e-9
+            )
         ):
             raise ValueError(
                 f"{config_path} was trained with encoder={old_kind}, proprio_dim={old_proprio}, "
-                f"base_action_dim={old_base_dim}, action_dim={old_action}, base_policy={old_base!r}; "
+                f"base_action_dim={old_base_dim}, action_dim={old_action}, base_policy={old_base!r}, "
+                f"dmp_gripper={old_gripper}, residual_blend_scale={old_blend}, "
+                f"residual_min_base_weight={old_min_weight}; "
                 f"this run uses encoder={self.cfg.encoder.kind}, "
                 f"proprio_dim={self.cfg.encoder.proprio_dim}, "
                 f"base_action_dim={self.cfg.encoder.base_action_dim}, "
-                f"action_dim={self.cfg.action_dim}, base_policy={self.cfg.base_policy!r}. "
+                f"action_dim={self.cfg.action_dim}, base_policy={self.cfg.base_policy!r}, "
+                f"dmp_gripper={self.cfg.dmp_gripper}, "
+                f"residual_blend_scale={self.cfg.residual_blend_scale}, "
+                f"residual_min_base_weight={self.cfg.residual_min_base_weight}. "
                 "Use a fresh --checkpoint-dir for the new observation/action space."
             )
 
@@ -887,6 +952,13 @@ class HilLiberoTrainer:
 
     def _pose(self, obs: dict) -> np.ndarray:
         return self._pose_from_state(self.obs_adapter.state(obs))
+
+    def _pose_with_grip(self, obs: dict, grip: float) -> np.ndarray:
+        """DMP pose plus the current commanded gripper state, when modeled."""
+        pose = self._pose(obs)
+        if self.cfg.dmp_gripper:
+            pose = np.concatenate([pose, np.asarray([grip], np.float32)])
+        return pose
 
     def _make_dmp_base_policy(self) -> DmpBasePolicy:
         files = self._demo_files()
@@ -898,13 +970,21 @@ class HilLiberoTrainer:
         if not transitions:
             raise ValueError(f"--base-policy dmp: {source} contains no transitions")
 
+        actions = [np.asarray(t["actions"], np.float32) for t in transitions]
         states = [np.asarray(t["observations"]["state"]) for t in transitions]
         states.append(np.asarray(transitions[-1]["next_observations"]["state"]))
         poses = np.stack([self._pose_from_state(s) for s in states])
+        if self.cfg.dmp_gripper:
+            # State i sees the gripper command applied at i-1; state 0 starts open
+            # (LIBERO resets with gripper=-1).  This aligns each DMP target with
+            # the next demonstrated action's gripper entry.
+            grip_states = np.concatenate([[-1.0], [float(a[-1]) for a in actions]])
+            poses = np.concatenate([poses, grip_states[:, None]], axis=1)
         policy = DmpBasePolicy(
             poses,
             dt=1.0 / max(self.cfg.control_hz, 1e-6),
             rotation=self.cfg.rotation,
+            gripper=self.cfg.dmp_gripper,
             action_dim=self.cfg.action_dim,
             max_step_m=self.cfg.max_step_m,
             max_step_rad=self.cfg.max_step_rad,
@@ -914,14 +994,15 @@ class HilLiberoTrainer:
         print(
             f"[dmp] fit base policy to first demo {source} "
             f"({len(transitions)} transitions, {len(poses)} pose samples, "
-            f"pose_dim={policy.pose_dim}, weights/dim={self.cfg.dmp_weights_per_dim})"
+            f"pose_dim={policy.pose_dim}, gripper={policy.gripper}, "
+            f"weights/dim={self.cfg.dmp_weights_per_dim})"
         )
         return policy
 
-    def _base_action(self, obs: dict) -> np.ndarray | None:
+    def _base_action(self, obs: dict, grip: float) -> np.ndarray | None:
         if self.base_policy is None:
             return None
-        return self.base_policy.action(self._pose(obs))
+        return self.base_policy.action(self._pose_with_grip(obs, grip))
 
     def _append_base_action(self, obs: dict, base_action: np.ndarray) -> dict:
         out = dict(obs)
@@ -931,16 +1012,25 @@ class HilLiberoTrainer:
 
     def _add_base_actions(self, transitions: list[dict]) -> list[dict]:
         """Expand demo observations with DMP actions and convert actions to residuals."""
+        actions = [np.asarray(t["actions"], np.float32) for t in transitions]
         states = [np.asarray(t["observations"]["state"]) for t in transitions]
         states.append(np.asarray(transitions[-1]["next_observations"]["state"]))
         poses = np.stack([self._pose_from_state(s) for s in states])
+        if self.cfg.dmp_gripper:
+            grip_states = np.concatenate([[-1.0], [float(a[-1]) for a in actions]])
+            poses = np.concatenate([poses, grip_states[:, None]], axis=1)
         self.base_policy.reset(poses[0])
         base_actions = np.stack([self.base_policy.action(pose) for pose in poses])
 
         out = []
         for i, transition in enumerate(transitions):
             action = np.asarray(transition["actions"], np.float32).copy()
-            residual = np.clip(action - base_actions[i], -1.0, 1.0).astype(np.float32)
+            residual = residual_from_final(
+                action,
+                base_actions[i],
+                residual_scale=self.cfg.residual_blend_scale,
+                min_base_weight=self.cfg.residual_min_base_weight,
+            )
             out.append(
                 {
                     **transition,
@@ -1054,7 +1144,8 @@ class HilLiberoTrainer:
                 self.record_demos()
                 return
             if self.cfg.eval_only:
-                self.evaluate(self.cfg.eval_episodes, iteration=0, tag="eval_only")
+                result = self.evaluate(self.cfg.eval_episodes, iteration=0, tag="eval_only")
+                self._maybe_enable_perturbation(result)
                 return
             self._start_learner()
             while self._episodes < self.cfg.max_episodes and self._env_steps < self.cfg.max_env_steps:
@@ -1063,11 +1154,12 @@ class HilLiberoTrainer:
                 self._collected_episodes += 1
                 self._flush(episode, success=success)
                 if self._should_eval():
-                    self.evaluate(
+                    result = self.evaluate(
                         self.cfg.eval_episodes,
                         iteration=self._collected_episodes,
                         tag=f"ep{self._collected_episodes}",
                     )
+                    self._maybe_enable_perturbation(result)
             self._stop_learner()
             _learner.save_agent_checkpoint(self.cfg, self.agent, self._grad_step)
             print(
@@ -1087,6 +1179,20 @@ class HilLiberoTrainer:
             and self._collected_episodes >= self.cfg.eval_after_episodes
             and self._collected_episodes % self.cfg.eval_interval == 0
         )
+
+    def _maybe_enable_perturbation(self, result: dict) -> None:
+        threshold = float(self.cfg.perturb_after_success_rate)
+        if (
+            threshold > 0.0
+            and bool(self.cfg.perturb_objects)
+            and not self.env_worker.perturb_enabled
+            and float(result.get("success_rate", 0.0)) > threshold
+        ):
+            self.env_worker.set_perturb(enabled=True)
+            print(
+                f"[perturb] success={result['success_rate']:.2f} > {threshold:.2f}; "
+                "enabling EEF/object start-state perturbations"
+            )
 
     def _env_action(self, action: np.ndarray, grip: float) -> np.ndarray:
         """Agent action -> the 7-dim LIBERO action.
@@ -1121,8 +1227,8 @@ class HilLiberoTrainer:
         # action into the observation the agent sees.
         base_action = None
         if self.base_policy is not None:
-            self.base_policy.reset(self._pose(state.obs))
-            base_action = self._base_action(state.obs)
+            self.base_policy.reset(self._pose_with_grip(state.obs, grip))
+            base_action = self._base_action(state.obs, grip)
         obs_enc = self.obs_adapter.encode(state.obs, base_action=base_action)
 
         print(f"\n[episode] task {cfg.task_id}: {self.task_name}")
@@ -1164,7 +1270,16 @@ class HilLiberoTrainer:
                     self.actor_agent.sample_actions(obs_enc, seed=self._next_key(), argmax=False),
                     np.float32,
                 )
-                final_action = residual if base_action is None else np.clip(base_action + residual, -1.0, 1.0)
+                final_action = (
+                    residual
+                    if base_action is None
+                    else combine_base_residual(
+                        base_action,
+                        residual,
+                        residual_scale=cfg.residual_blend_scale,
+                        min_base_weight=cfg.residual_min_base_weight,
+                    )
+                )
                 intervened = False
 
             final_action = np.asarray(final_action, np.float32)
@@ -1177,10 +1292,16 @@ class HilLiberoTrainer:
                 final_action[-1] = grip  # BC regresses a persistent open/closed label
 
             # The buffer stores the residual the RL agent must learn. With a
-            # base policy the executed action is base + residual; without one
-            # the residual is simply the executed action.
+            # base policy the executed action is the weighted base+residual
+            # composition; invert it so the stored residual reproduces the
+            # demonstrated/executed action under the same weighting.
             if base_action is not None:
-                residual_action = np.clip(final_action - base_action, -1.0, 1.0).astype(np.float32)
+                residual_action = residual_from_final(
+                    final_action,
+                    base_action,
+                    residual_scale=cfg.residual_blend_scale,
+                    min_base_weight=cfg.residual_min_base_weight,
+                )
             else:
                 residual_action = final_action.copy()
 
@@ -1196,7 +1317,7 @@ class HilLiberoTrainer:
             elif done or state.steps >= cfg.max_episode_steps:
                 state.done = True
 
-            next_base_action = self._base_action(obs) if self.base_policy is not None else None
+            next_base_action = self._base_action(obs, grip) if self.base_policy is not None else None
             next_enc = self.obs_adapter.encode(obs, base_action=next_base_action)
             episode.append(
                 {
@@ -1373,13 +1494,13 @@ class HilLiberoTrainer:
 
             # Clear stale pad events and re-anchor the DMP for this episode.
             self.operator.reset()
+            grip = -1.0
             base_action = None
             if self.base_policy is not None:
-                self.base_policy.reset(self._pose(state.obs))
-                base_action = self._base_action(state.obs)
+                self.base_policy.reset(self._pose_with_grip(state.obs, grip))
+                base_action = self._base_action(state.obs, grip)
             obs_enc = self.obs_adapter.encode(state.obs, base_action=base_action)
             frames = [self.obs_adapter.display(state.obs)]
-            grip = -1.0
             skipped_this = False
 
             while not state.done:
@@ -1390,7 +1511,16 @@ class HilLiberoTrainer:
                     break
 
                 residual = np.array(agent.sample_actions(obs_enc, seed=self._next_key(), argmax=True), np.float32)
-                action = residual if base_action is None else np.clip(base_action + residual, -1.0, 1.0)
+                action = (
+                    residual
+                    if base_action is None
+                    else combine_base_residual(
+                        base_action,
+                        residual,
+                        residual_scale=self.cfg.residual_blend_scale,
+                        min_base_weight=self.cfg.residual_min_base_weight,
+                    )
+                )
                 g = _discretize_gripper(float(action[-1]))
                 if g != 0.0:
                     grip = g
@@ -1407,7 +1537,7 @@ class HilLiberoTrainer:
                 elif done or state.steps >= self.cfg.max_episode_steps:
                     state.done = True
 
-                next_base_action = self._base_action(obs) if self.base_policy is not None else None
+                next_base_action = self._base_action(obs, grip) if self.base_policy is not None else None
                 obs_enc = self.obs_adapter.encode(obs, base_action=next_base_action)
                 base_action = next_base_action
                 frames.append(self.obs_adapter.display(obs))

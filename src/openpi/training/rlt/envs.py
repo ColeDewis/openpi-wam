@@ -90,17 +90,155 @@ LIBERO_DUMMY_ACTION = np.array([0.0] * 6 + [-1.0], dtype=np.float32)
 RESET_SETTLE_STEPS = 15
 
 
-def _reset_env_to(env, init_state):
+def _perturb_objects_xy(env, rng: np.random.Generator, xy_m: float, *, all_objects: bool) -> list[str]:
+    """Move movable objects by a uniform +-xy_m in x/y, preserving z.
+
+    LIBERO's init states are full MuJoCo states, so we can edit the free-joint
+    qpos directly.  z and the quaternion are left untouched: changing z would
+    let objects clip through the table.  Primary ``obj_of_interest`` objects
+    (the bowl in task 1) are always candidates.  With ``all_objects``, every
+    movable object is perturbed except non-primary objects whose BDDL init
+    relation is ``In`` a container (drawer/cabinet), where an xy shift would
+    push them into the walls.
+    """
+    base = env.env
+    objects = getattr(base, "objects_dict", {}) or {}
+    primary = [name for name in getattr(base, "obj_of_interest", ()) if name in objects]
+    primary_set = set(primary)
+    if all_objects:
+        parsed = getattr(base, "parsed_problem", {}) or {}
+        initial_state = parsed.get("initial_state", ()) or ()
+        inside = {
+            str(rel[1])
+            for rel in initial_state
+            if isinstance(rel, list | tuple) and len(rel) >= 2 and str(rel[0]).lower() in ("in", "inside")
+        }
+        names = [name for name in objects if name in primary_set or name not in inside]
+    else:
+        names = primary or list(objects)
+    sim = base.sim
+    perturbed: list[str] = []
+    for name in names:
+        obj = objects.get(name)
+        joints = getattr(obj, "joints", None)
+        if not joints:
+            continue
+        joint = joints[-1]
+        addr = sim.model.get_joint_qpos_addr(joint)
+        # Free joints have a (start, end) address of length 7; hinge/slide
+        # joints return an int and cannot be translated this way.
+        if not isinstance(addr, tuple) or addr[1] - addr[0] != 7:
+            continue
+        qpos = np.array(sim.data.qpos[addr[0] : addr[1]], dtype=np.float64, copy=True)
+        dx, dy = rng.uniform(-xy_m, xy_m, size=2)
+        qpos[0] += dx
+        qpos[1] += dy
+        sim.data.set_joint_qpos(joint, qpos)
+        perturbed.append(name)
+    sim.forward()
+    return perturbed
+
+
+def _perturb_eef_xyz(env, rng: np.random.Generator, xyz_m: float) -> np.ndarray:
+    """Offset the start EEF by a uniform +-xyz_m using damped-least-squares IK.
+
+    pybullet is not installed, so robosuite's InverseKinematicsController is
+    unavailable.  MuJoCo exposes the grip-site Jacobian, which is enough for a
+    small Cartesian offset: iterate ``dq = J^T (J J^T + lambda I)^-1 e`` and
+    clamp to joint limits.  The controller's goal/nullspace anchor is reset to
+    the perturbed configuration afterwards so the settle steps do not pull the
+    arm back toward the unperturbed start.
+    """
+    base = env.env
+    robot = base.robots[0]
+    sim = base.sim
+    site_id = int(robot.eef_site_id)
+    site_name = sim.model.site_id2name(site_id)
+    qpos_idx = np.asarray(robot._ref_joint_pos_indexes, dtype=int)
+    qvel_idx = np.asarray(robot._ref_joint_vel_indexes, dtype=int)
+    joint_ids = np.asarray(robot._ref_joint_indexes, dtype=int)
+
+    start = np.array(sim.data.site_xpos[site_id], dtype=np.float64, copy=True)
+    delta = rng.uniform(-xyz_m, xyz_m, size=3)
+    target = start + delta
+    q = np.array(sim.data.qpos[qpos_idx], dtype=np.float64, copy=True)
+    lo = np.array(sim.model.jnt_range[joint_ids, 0], dtype=np.float64, copy=True)
+    hi = np.array(sim.model.jnt_range[joint_ids, 1], dtype=np.float64, copy=True)
+    limited = hi > lo
+    damping = 1e-3
+    for _ in range(64):
+        sim.forward()
+        err = target - np.array(sim.data.site_xpos[site_id], dtype=np.float64, copy=True)
+        if float(np.linalg.norm(err)) < 1e-4:
+            break
+        jacp = np.asarray(sim.data.get_site_jacp(site_name), dtype=np.float64)[:, qvel_idx]
+        dq = jacp.T @ np.linalg.solve(jacp @ jacp.T + damping * np.eye(3), err)
+        max_step = 0.05
+        peak = float(np.max(np.abs(dq)))
+        if peak > max_step:
+            dq *= max_step / peak
+        q = q + dq
+        if np.any(limited):
+            q = np.where(limited, np.clip(q, lo, hi), q)
+        sim.data.qpos[qpos_idx] = q
+    sim.forward()
+    sim.data.qvel[qvel_idx] = 0.0
+    try:
+        robot.controller.update_initial_joints(np.array(robot._joint_positions, dtype=np.float64, copy=True))
+    except Exception:
+        pass
+    return np.array(sim.data.site_xpos[site_id], dtype=np.float64, copy=True) - start
+
+
+def _apply_start_perturbations(
+    env,
+    rng: np.random.Generator,
+    *,
+    eef_xyz_m: float,
+    object_xy_m: float,
+    all_objects: bool,
+) -> None:
+    if object_xy_m > 0.0:
+        names = _perturb_objects_xy(env, rng, object_xy_m, all_objects=all_objects)
+        logger.debug("perturbed objects (xy +-%.3fm): %s", object_xy_m, names)
+    if eef_xyz_m > 0.0:
+        delta = _perturb_eef_xyz(env, rng, eef_xyz_m)
+        logger.debug("perturbed EEF start by %s", np.round(delta, 4))
+    env.env.sim.forward()
+
+
+def _reset_env_to(
+    env,
+    init_state,
+    *,
+    perturb: bool = False,
+    rng: np.random.Generator | None = None,
+    eef_xyz_m: float = 0.0,
+    object_xy_m: float = 0.0,
+    all_objects: bool = False,
+):
     """Reset a raw LIBERO env to a specific trial init state, then settle.
 
-    env.reset() -> env.set_init_state(init_state) -> RESET_SETTLE_STEPS no-op steps.
-    Returns the settled obs. If init_state is None, falls back to a plain reset (the
-    old behaviour) so callers without an init state still work.
+    env.reset() -> env.set_init_state(init_state) -> optional start-state
+    perturbation -> RESET_SETTLE_STEPS no-op steps.  The perturbation is applied
+    after the init state (which overwrites sampler placements) and before the
+    settle steps.  If init_state is None, falls back to a plain reset (the old
+    behaviour) so callers without an init state still work.
     """
     obs = env.reset()
     if init_state is None:
         return obs
     obs = env.set_init_state(init_state)
+    if perturb and (eef_xyz_m > 0.0 or object_xy_m > 0.0):
+        if rng is None:
+            rng = np.random.default_rng()
+        _apply_start_perturbations(
+            env,
+            rng,
+            eef_xyz_m=eef_xyz_m,
+            object_xy_m=object_xy_m,
+            all_objects=all_objects,
+        )
     for _ in range(RESET_SETTLE_STEPS):
         obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
     return obs
@@ -294,6 +432,9 @@ class _LiberoEnvFn:
     seed: int
     camera_size: int = 128
     egl_device_id: str | None = None  # parent-selected EGL device, passed to child
+    perturb_eef_xyz_m: float = 0.0
+    perturb_object_xy_m: float = 0.0
+    perturb_all_objects: bool = True
 
     def __call__(self):
         # spawn-mode subprocess: reuse the EGL device the PARENT already found
@@ -328,6 +469,9 @@ class _LiberoEnvFn:
             render_gpu_device_id=render_gpu_device_id,
         )
         env.seed(self.seed)
+        # Per-env perturbation RNG; seeded separately from the env so reset
+        # perturbations are reproducible but do not disturb LIBERO's samplers.
+        env.perturb_rng = np.random.default_rng(int(self.seed) + 0x9E3779B9)
         return env
 
 
@@ -533,8 +677,23 @@ def _libero_env_worker(parent: mp_connection.Connection, child: mp_connection.Co
             elif cmd == "reset":
                 child.send(_attach_subgoal(env.reset(), subgoal_eval))
             elif cmd == "reset_to":
-                # reset + set_init_state + settle, done child-side (one round trip).
-                child.send(_attach_subgoal(_reset_env_to(env, data), subgoal_eval))
+                # reset + set_init_state + optional start-state perturbation +
+                # settle, done child-side (one round trip).
+                init_state, perturb = data
+                child.send(
+                    _attach_subgoal(
+                        _reset_env_to(
+                            env,
+                            init_state,
+                            perturb=perturb,
+                            rng=getattr(env, "perturb_rng", None),
+                            eef_xyz_m=float(getattr(env_fn, "perturb_eef_xyz_m", 0.0)),
+                            object_xy_m=float(getattr(env_fn, "perturb_object_xy_m", 0.0)),
+                            all_objects=bool(getattr(env_fn, "perturb_all_objects", False)),
+                        ),
+                        subgoal_eval,
+                    )
+                )
             elif cmd == "reconfigure":
                 # swap the env to a new task (bddl). `data` is a fresh env_fn
                 # (_LiberoEnvFn) built by the parent for the target task. Mirrors
@@ -544,7 +703,8 @@ def _libero_env_worker(parent: mp_connection.Connection, child: mp_connection.Co
                 except Exception:
                     pass
                 try:
-                    env = data()
+                    env_fn = data
+                    env = env_fn()
                     # Rebuilt env => a different task => re-derive. The parent checks
                     # the names still match the configured channels, since a task swap
                     # that changed the predicate set would change the head count.
@@ -582,6 +742,8 @@ class _SubprocEnv:
     def __init__(self, env_fn):
         ctx = multiprocessing.get_context("spawn")
         self._parent, child = ctx.Pipe()
+        # Set by EnvWorker.make_pool from its perturbation curriculum flag.
+        self.perturb = False
         # spawn re-imports the parent script as __mp_main__, re-running its top-level
         # `import jax` chain. The env subprocess only needs MuJoCo, not JAX — and if
         # its JAX tries to grab CUDA it crashes ("no supported devices for CUDA",
@@ -640,7 +802,7 @@ class _SubprocEnv:
         return self._recv()
 
     def reset_to(self, init_state):
-        self._parent.send(("reset_to", init_state))
+        self._parent.send(("reset_to", (init_state, bool(self.perturb))))
         return self._recv()
 
     def reconfigure(self, env_fn):
@@ -780,6 +942,15 @@ class EnvWorker:
         # group_size structures the env pool: consecutive group_size slots share one
         # (task, trial) start. RLT uses group_size=1 (cfg has no such field).
         self.group_size = max(1, getattr(cfg, "group_size", 1))
+        # Start-state perturbation curriculum.  A positive
+        # perturb_after_success_rate starts unperturbed and is switched on by
+        # set_perturb(True) after an eval exceeds that success rate.
+        self._perturb_objects = bool(getattr(cfg, "perturb_objects", False))
+        self._perturb_eef_xyz_m = float(getattr(cfg, "perturb_eef_xyz_m", 0.0))
+        self._perturb_object_xy_m = float(getattr(cfg, "perturb_object_xy_m", 0.0))
+        self._perturb_all_objects = bool(getattr(cfg, "perturb_all_objects", False))
+        self._perturb_after_success_rate = float(getattr(cfg, "perturb_after_success_rate", 0.0))
+        self.perturb_enabled = self._perturb_objects and self._perturb_after_success_rate <= 0.0
         self._build_envs()
 
     def _build_envs(self):
@@ -884,6 +1055,9 @@ class EnvWorker:
                     seed=seed,
                     camera_size=int(getattr(self.cfg, "camera_size", 128)),
                     egl_device_id=dev,
+                    perturb_eef_xyz_m=self._perturb_eef_xyz_m,
+                    perturb_object_xy_m=self._perturb_object_xy_m,
+                    perturb_all_objects=self._perturb_all_objects,
                 )
             )
             self._slot_envs.append(env)
@@ -912,6 +1086,15 @@ class EnvWorker:
                     f"from --gvf_channels to save the compute."
                 )
         logger.info(f"Built {self.batch_size} env slots")
+        logger.info(
+            "start-state perturbations %s (eef +-%.3fm xyz, objects +-%.3fm xy, all_objects=%s, "
+            "after_success_rate=%.2f)",
+            "ENABLED" if self.perturb_enabled else "DISABLED",
+            self._perturb_eef_xyz_m,
+            self._perturb_object_xy_m,
+            self._perturb_all_objects,
+            self._perturb_after_success_rate,
+        )
 
     def _reset_state_to_task_trial(self, rsid: int) -> tuple[int, int]:
         """Map a global reset_state_id -> (task_id, trial_id) via the cumsum bins
@@ -926,7 +1109,15 @@ class EnvWorker:
             return
         seed = self.cfg.seed + ltid * 1000 + slot_idx
         dev = self._egl_render_devices[slot_idx % len(self._egl_render_devices)]
-        env_fn = _LiberoEnvFn(bddl_path=self._task_bddl[ltid], seed=seed, egl_device_id=dev)
+        env_fn = _LiberoEnvFn(
+            bddl_path=self._task_bddl[ltid],
+            seed=seed,
+            camera_size=int(getattr(self.cfg, "camera_size", 128)),
+            egl_device_id=dev,
+            perturb_eef_xyz_m=self._perturb_eef_xyz_m,
+            perturb_object_xy_m=self._perturb_object_xy_m,
+            perturb_all_objects=self._perturb_all_objects,
+        )
         self._slot_envs[slot_idx].reconfigure(env_fn)
         self._slot_task[slot_idx] = ltid
         # A task swap re-derives the predicates. Disable labeling rather than ship a
@@ -1001,8 +1192,23 @@ class EnvWorker:
             self._reconfigure_slot(slot_idx, ltid)
             tok_t, mask_t, _ = self._task_tok[ltid]
             init_state = self._task_init_states[ltid][trial]
-            pool.append(_EpState(self._slot_envs[slot_idx], tok_t, mask_t, ltid, init_state=init_state))
+            env = self._slot_envs[slot_idx]
+            env.perturb = self.perturb_enabled
+            pool.append(_EpState(env, tok_t, mask_t, ltid, init_state=init_state))
         return pool
+
+    def set_perturb(self, *, enabled: bool) -> None:
+        """Enable/disable start-state perturbations for subsequent resets."""
+        self.perturb_enabled = bool(enabled) and self._perturb_objects
+        for env in self._slot_envs:
+            env.perturb = self.perturb_enabled
+        logger.info(
+            "start-state perturbations %s (eef +-%.3fm xyz, objects +-%.3fm xy, all_objects=%s)",
+            "ENABLED" if self.perturb_enabled else "DISABLED",
+            self._perturb_eef_xyz_m,
+            self._perturb_object_xy_m,
+            self._perturb_all_objects,
+        )
 
     def task_language(self, task_id: int) -> str:
         """Natural-language instruction for a LIBERO task id."""
@@ -1111,6 +1317,8 @@ class RealRobotEnvWorker:
         if not self._channels:
             raise ValueError("RealRobotEnvWorker needs at least one _BridgeChannel")
         self.batch_size = len(self._channels)  # one slot per physical robot; grow via more channels, not repeats
+        # No simulator start-state to perturb on the real-robot path.
+        self.perturb_enabled = False
         if cfg.total_num_envs != self.batch_size:
             logger.warning(
                 f"cfg.total_num_envs={cfg.total_num_envs} but {self.batch_size} channel(s) were "
@@ -1160,6 +1368,10 @@ class RealRobotEnvWorker:
             init_state = {"task_id": tid, "trial": trial}
             pool.append(_EpState(proxy, tok_t, mask_t, tid, init_state=init_state))
         return pool
+
+    def set_perturb(self, *, enabled: bool) -> None:
+        """No-op: the real-robot path has no simulator start state to perturb."""
+        self.perturb_enabled = False
 
     def close(self) -> None:
         pass  # channels/servers are owned by whoever constructed them (see train script)
