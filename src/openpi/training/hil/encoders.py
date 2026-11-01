@@ -50,7 +50,13 @@ class EncoderConfig:
     # Observation shape. The WAM defaults are 16-dim proprio and 224x224
     # frames; the LIBERO simulator uses 8-dim (or 17 with velocities) and
     # 128x128, so both are config-selectable rather than hardcoded.
+    #
+    # ``proprio_dim`` is the TOTAL state width. When a base policy is used,
+    # ``base_action_dim`` values are appended to the raw WAM proprio (or are
+    # already included by the LIBERO adapter). For WAM:
+    #   proprio_dim == WAM_PROPRIO_DIM + base_action_dim
     proprio_dim: int = WAM_PROPRIO_DIM
+    base_action_dim: int = 0
     image_size: tuple[int, int] = (224, 224)
 
     # rltoken
@@ -73,6 +79,8 @@ class EncoderConfig:
         self.image_size = tuple(self.image_size)
         if self.proprio_dim <= 0:
             raise ValueError(f"proprio_dim must be positive, got {self.proprio_dim}")
+        if self.base_action_dim < 0:
+            raise ValueError(f"base_action_dim must be non-negative, got {self.base_action_dim}")
         if len(self.image_size) != 2:
             raise ValueError(f"image_size must be (height, width), got {self.image_size}")
 

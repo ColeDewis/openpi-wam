@@ -43,6 +43,11 @@ class LearnerConfig:
     seed: int = 42
     action_dim: int = 7
 
+    # Base policy metadata. ``encoder.proprio_dim`` already includes
+    # ``base_action_dim`` when the actor appends a base action to proprio.
+    base_policy: str = "none"
+    base_action_dim: int = 0
+
     # Defaults mirror hil-serl's DefaultTrainingConfig.
     batch_size: int = 256
     cta_ratio: int = 2
@@ -68,6 +73,22 @@ class LearnerConfig:
             raise ValueError("--checkpoint-dir is required")
         if self.algorithm not in ("rlpd", "hgdagger"):
             raise ValueError(f"algorithm must be 'rlpd' or 'hgdagger', got {self.algorithm!r}")
+        if self.base_action_dim < 0:
+            raise ValueError(f"base_action_dim must be non-negative, got {self.base_action_dim}")
+
+        # Keep the top-level metadata and the encoder config in sync. When a
+        # base policy is used, the raw WAM proprio grows by base_action_dim.
+        if self.encoder.base_action_dim and not self.base_action_dim:
+            self.base_action_dim = self.encoder.base_action_dim
+        elif self.base_action_dim and self.encoder.base_action_dim not in (0, self.base_action_dim):
+            raise ValueError(
+                f"base_action_dim={self.base_action_dim} conflicts with "
+                f"encoder.base_action_dim={self.encoder.base_action_dim}"
+            )
+        self.encoder.base_action_dim = self.base_action_dim
+        if self.base_action_dim and self.encoder.proprio_dim == _encoders.WAM_PROPRIO_DIM:
+            self.encoder.proprio_dim = _encoders.WAM_PROPRIO_DIM + self.base_action_dim
+
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
         Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
@@ -90,6 +111,8 @@ def save_run_config(cfg: LearnerConfig) -> None:
         "algorithm": cfg.algorithm,
         "action_dim": cfg.action_dim,
         "encoder": dataclasses.asdict(cfg.encoder),
+        "base_policy": getattr(cfg, "base_policy", "none"),
+        "base_action_dim": getattr(cfg, "base_action_dim", 0),
     }
     (Path(cfg.checkpoint_dir) / "config.json").write_text(json.dumps(payload, indent=2))
 

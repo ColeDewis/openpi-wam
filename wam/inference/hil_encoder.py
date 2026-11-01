@@ -44,20 +44,42 @@ def vla_state(low_dim: dict) -> np.ndarray:
     ).astype(np.float32)
 
 
-def wam_proprio(low_dim: dict) -> np.ndarray:
-    """16-dim RL proprio shared by all three WAM encoders."""
+def wam_proprio(low_dim: dict, base_action: np.ndarray | None = None) -> np.ndarray:
+    """16-dim RL proprio shared by all three WAM encoders.
+
+    When a base policy is active, its next action (``policy_jp``) is appended,
+    making the state ``WAM_PROPRIO_DIM + base_action_dim`` wide.
+    """
     gripper = float(low_dim.get("gripper_pos", 0.0))
     jv = np.asarray(low_dim.get("follower_jv", np.zeros(7)), np.float32)
     gv = np.asarray([low_dim.get("gripper_vel", 0.0)], np.float32)
-    return np.concatenate(
-        [
-            np.asarray(low_dim["follower_cart_pos"], np.float32),
-            quat_to_rotvec(np.asarray(low_dim["follower_cart_rot"], np.float32)),
-            np.asarray([gripper, -gripper], np.float32),
-            jv,
-            gv,
-        ]
-    ).astype(np.float32)
+    parts = [
+        np.asarray(low_dim["follower_cart_pos"], np.float32),
+        quat_to_rotvec(np.asarray(low_dim["follower_cart_rot"], np.float32)),
+        np.asarray([gripper, -gripper], np.float32),
+        jv,
+        gv,
+    ]
+    if base_action is not None:
+        parts.append(np.asarray(base_action, np.float32).reshape(-1))
+    return np.concatenate(parts).astype(np.float32)
+
+
+def _base_action_from_low_dim(cfg: EncoderConfig, low_dim: dict) -> np.ndarray | None:
+    """Read the base policy's delta joint action from the extended UDP packet."""
+    if cfg.base_action_dim <= 0:
+        return None
+    if "policy_jp" not in low_dim:
+        raise ValueError(
+            "encoder.base_action_dim > 0 requires a 'policy_jp' field; "
+            "use the extended recorder packet, not the legacy one."
+        )
+    action = np.asarray(low_dim["policy_jp"], np.float32).reshape(-1)
+    if action.shape[0] != cfg.base_action_dim:
+        raise ValueError(
+            f"policy_jp has {action.shape[0]} dims, expected encoder.base_action_dim={cfg.base_action_dim}"
+        )
+    return action
 
 
 def wam_force(low_dim: dict) -> np.ndarray:
@@ -67,15 +89,18 @@ def wam_force(low_dim: dict) -> np.ndarray:
 
 
 def _require_wam_proprio(cfg: EncoderConfig) -> None:
-    """The WAM encoders emit exactly ``WAM_PROPRIO_DIM`` features.
+    """The WAM encoders emit ``WAM_PROPRIO_DIM + base_action_dim`` features.
 
     The LIBERO simulator has a different proprio (8/17 dims) and its own
     adapter (``openpi.training.hil.libero``); catching the mismatch here keeps
     a sim checkpoint from being deployed against WAM packets by accident.
     """
-    if cfg.proprio_dim != WAM_PROPRIO_DIM:
+    expected = WAM_PROPRIO_DIM + cfg.base_action_dim
+    if cfg.proprio_dim != expected:
         raise ValueError(
-            f"WAM encoders produce {WAM_PROPRIO_DIM}-dim proprio, got encoder.proprio_dim={cfg.proprio_dim}. "
+            f"WAM encoders produce {expected}-dim proprio "
+            f"({WAM_PROPRIO_DIM} raw + {cfg.base_action_dim} base action), "
+            f"got encoder.proprio_dim={cfg.proprio_dim}. "
             "Use the LIBERO adapter for simulator checkpoints."
         )
 
@@ -93,7 +118,8 @@ class WamHilserlEncoder:
             key: np.asarray(raw_obs[key], np.uint8)[None]  # (T=1, H, W, C)
             for key in self.cfg.image_keys
         }
-        obs["state"] = wam_proprio(raw_obs["low_dim"])[None]  # (T=1, D)
+        base_action = _base_action_from_low_dim(self.cfg, raw_obs["low_dim"])
+        obs["state"] = wam_proprio(raw_obs["low_dim"], base_action)[None]  # (T=1, D)
         return obs
 
 
@@ -181,7 +207,8 @@ class WamRltokenEncoder:
             tokenized_prompt_mask=jnp.asarray(self._prompt_mask)[None],
         )
         z_rl = np.asarray(self._encode_impl(self._state, observation))[0]
-        return {"state": np.concatenate([z_rl, wam_proprio(raw_obs["low_dim"])]).astype(np.float32)}
+        base_action = _base_action_from_low_dim(self.cfg, raw_obs["low_dim"])
+        return {"state": np.concatenate([z_rl, wam_proprio(raw_obs["low_dim"], base_action)]).astype(np.float32)}
 
     def _normalized_vla_state(self, low_dim: dict) -> np.ndarray:
         state = vla_state(low_dim)
@@ -237,7 +264,8 @@ class WamTimmEncoder:
     def encode(self, raw_obs: dict) -> dict:
         parts = [self._features(np.asarray(raw_obs[key])) for key in self.cfg.image_keys]
         parts.append(wam_force(raw_obs["low_dim"]))
-        parts.append(wam_proprio(raw_obs["low_dim"]))
+        base_action = _base_action_from_low_dim(self.cfg, raw_obs["low_dim"])
+        parts.append(wam_proprio(raw_obs["low_dim"], base_action))
         return {"state": np.concatenate(parts).astype(np.float32)}
 
 

@@ -1004,6 +1004,13 @@ class EnvWorker:
             pool.append(_EpState(self._slot_envs[slot_idx], tok_t, mask_t, ltid, init_state=init_state))
         return pool
 
+    def task_language(self, task_id: int) -> str:
+        """Natural-language instruction for a LIBERO task id."""
+        try:
+            return self._task_tok[int(task_id)][2]
+        except KeyError as exc:
+            raise ValueError(f"task id {task_id} is not in this pool's task set {self.task_ids}") from exc
+
     def close(self):
         for env in self._slot_envs:
             try:

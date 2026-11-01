@@ -35,6 +35,8 @@ class HilPolicy:
         config = json.loads(config_path.read_text())
         self.algorithm = config["algorithm"]  # "rlpd" | "hgdagger"
         self.action_dim = int(config["action_dim"])
+        self.base_policy = config.get("base_policy", "none")
+        self.base_action_dim = int(config.get("base_action_dim", 0))
         self.action_scale = np.asarray(action_scale, np.float32)
         encoder_config = dict(config["encoder"])
         encoder_config["image_keys"] = tuple(encoder_config.get("image_keys", ("front_image", "wrist_image")))

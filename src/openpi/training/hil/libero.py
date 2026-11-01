@@ -8,7 +8,7 @@ optional MJPEG stream.
 Record demos (pure teleop, one pickle per successful episode):
 
     uv run --extra libero scripts/train_hil_libero.py --record-demos 20 \
-        --demo-dir /home/serg/projects/openpi-wam/demos/goal_t1 --suite libero_goal --task-id 1
+        --demo-path /home/serg/projects/openpi-wam/demos/goal_t1 --suite libero_goal --task-id 1
 
 Train (resumes from the latest checkpoint in ``--checkpoint-dir``):
 
@@ -18,10 +18,22 @@ Train (resumes from the latest checkpoint in ``--checkpoint-dir``):
         --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_rlpd \
         --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/rlpd_goal_t1
 
+Train a residual policy on top of a DMP base policy. The DMP is fit to the
+first trajectory found under ``--demo-path``; the RL agent sees the DMP's next
+delta-pose action in proprio and learns only the residual:
+
+    uv run --extra libero scripts/train_hil_libero.py --algorithm rlpd \
+        --suite libero_goal --task-id 1 \
+        --base-policy dmp \
+        --demo-path /home/serg/projects/openpi-wam/demos/goal_t1 \
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_rlpd_dmp \
+        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/rlpd_goal_t1_dmp
+
 Controls: OPTIONS starts an episode / marks success, SHARE marks failure,
 left stick moves x/y, triangle/cross moves z, L2/R2 opens/closes the gripper,
-and PS hands control back to the policy. The right stick and square/circle
-control rotation only with ``--rotation``.
+and PS hands control back to the policy. D-pad left/right (or L1/R1) skips the
+current eval episode. The right stick and square/circle control rotation only
+with ``--rotation``.
 """
 
 # The MuJoCo backend and third_party/libero must be configured before importing
@@ -63,6 +75,7 @@ from openpi.models.tokenizer import PaligemmaTokenizer
 from openpi.training.hil import encoders as _encoders
 from openpi.training.hil import learner as _learner
 from openpi.training.hil.action_adapter import ActionAdapter
+from openpi.training.hil.dmp import DmpBasePolicy
 from openpi.training.hil.transitions import make_transition
 from openpi.training.hil.transitions import save_transitions
 from openpi.training.rlt import envs as _envs
@@ -103,22 +116,34 @@ def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
 
 
 class LiberoObsAdapter:
-    """Raw LIBERO obs -> the encoder's ``{front_image, wrist_image, state}`` dict."""
+    """Raw LIBERO obs -> the encoder's ``{front_image, wrist_image, state}`` dict.
 
-    def __init__(self, image_size: tuple[int, int] = (128, 128), *, include_velocity: bool = False):
+    When a base policy is active, ``base_action_dim`` extra values are appended
+    to the proprio vector.  They are the normalized delta-pose action proposed
+    by the DMP at this step, so the RL agent can learn a residual on top of it.
+    """
+
+    def __init__(
+        self,
+        image_size: tuple[int, int] = (128, 128),
+        *,
+        include_velocity: bool = False,
+        base_action_dim: int = 0,
+    ):
         self.image_size = tuple(image_size)
         self.include_velocity = include_velocity
+        self.base_action_dim = int(base_action_dim)
 
     @property
     def proprio_dim(self) -> int:
-        return 8 + (9 if self.include_velocity else 0)
+        return 8 + (9 if self.include_velocity else 0) + self.base_action_dim
 
     def _image(self, image: np.ndarray) -> np.ndarray:
         image = np.ascontiguousarray(np.asarray(image)[::-1, ::-1])
         image = image_tools.resize_with_pad(image, self.image_size[0], self.image_size[1])
         return image_tools.convert_to_uint8(image)
 
-    def state(self, obs: dict) -> np.ndarray:
+    def state(self, obs: dict, base_action: np.ndarray | None = None) -> np.ndarray:
         parts = [
             np.asarray(obs["robot0_eef_pos"], np.float32),
             _quat2axisangle(obs["robot0_eef_quat"]),
@@ -127,16 +152,28 @@ class LiberoObsAdapter:
         if self.include_velocity:
             parts.append(np.asarray(obs["robot0_joint_vel"], np.float32))
             parts.append(np.asarray(obs["robot0_gripper_qvel"], np.float32))
+        if self.base_action_dim:
+            if base_action is None:
+                base_action = np.zeros(self.base_action_dim, np.float32)
+            base_action = np.asarray(base_action, np.float32).reshape(-1)
+            if base_action.shape[0] != self.base_action_dim:
+                raise ValueError(f"base_action must have {self.base_action_dim} entries, got {base_action.shape[0]}")
+            parts.append(base_action)
         return np.concatenate(parts).astype(np.float32)
 
-    def encode(self, obs: dict) -> dict:
+    def pose(self, obs: dict, *, rotation: bool) -> np.ndarray:
+        """End-effector pose used by the DMP: xyz [+ axis-angle rotation]."""
+        state = self.state(obs)
+        return state[:6] if rotation else state[:3]
+
+    def encode(self, obs: dict, base_action: np.ndarray | None = None) -> dict:
         front = self._image(obs["agentview_image"])
         wrist = self._image(obs["robot0_eye_in_hand_image"])
         # (T=1, H, W, C) and (T=1, D): the agents stack a time axis even when T=1.
         return {
             "front_image": front[None],
             "wrist_image": wrist[None],
-            "state": self.state(obs)[None],
+            "state": self.state(obs, base_action)[None],
         }
 
     def display(self, obs: dict) -> np.ndarray:
@@ -170,7 +207,7 @@ _PAD_HTML = """<!doctype html>
 <div id="view"><img src="/stream.mjpg" alt="LIBERO stream"></div>
 <div id="help">
  <div id="pad" class="bad">controller: none - focus this tab and press any button on the pad</div>
- <div id="status">online episodes: 0 | demo episodes: 0 | collected episodes: 0 | training: 00:00:00</div>
+ <div id="status">task: loading... | online episodes: 0 | demo episodes: 0 | collected episodes: 0 | training: 00:00:00</div>
  <div id="grid">
   <div><b>OPTIONS</b> start episode / mark <b>SUCCESS</b></div>
   <div><b>SHARE</b> mark <b>FAILURE</b></div>
@@ -179,6 +216,7 @@ _PAD_HTML = """<!doctype html>
   <div><b>&#9651; / &#10005;</b> z up / z down</div>
   <div><b>&#9633; / &#9675;</b> roll left / right <span class="dim">(only with --rotation)</span></div>
   <div><b>L2 / R2</b> gripper open / close (release = hold)</div>
+  <div><b>D-pad &#9664; / &#9654;</b> (or L1 / R1) skip current eval episode</div>
   <div><b>PS</b> hand control back to the policy</div>
   <div class="dim">first stick/trigger/button input = human takeover; the policy stays off until PS</div>
  </div>
@@ -222,7 +260,7 @@ async function pollStatus() {
   try {
     const s = await (await fetch("/status")).json();
     document.getElementById("status").textContent =
-      "online episodes: " + s.online_episodes + " | demo episodes: " + s.demo_episodes +
+      "task: " + s.task + " | online episodes: " + s.online_episodes + " | demo episodes: " + s.demo_episodes +
       " | collected episodes: " + s.collected_episodes +
       " | training: " + s.training + " | " + s.mode + " | learner step " + s.learner_step;
   } catch (e) {}
@@ -366,6 +404,7 @@ class MJPEGServer:
 class PadEvent:
     options: bool = False  # OPTIONS: start (idle) / mark success (recording)
     share: bool = False  # SHARE: mark failure
+    skip: bool = False  # D-pad left/right or L1/R1: skip the current eval episode
 
 
 class GamepadOperator:
@@ -377,8 +416,10 @@ class GamepadOperator:
     """
 
     CROSS, CIRCLE, SQUARE, TRIANGLE = 0, 1, 2, 3
+    L1, R1 = 4, 5
     L2, R2 = 6, 7
     SHARE, OPTIONS = 8, 9
+    DPAD_LEFT, DPAD_RIGHT = 14, 15
     PS = 16
     N_BUTTONS = 18
 
@@ -419,6 +460,8 @@ class GamepadOperator:
                 self._event.options = True
             if rising[self.SHARE]:
                 self._event.share = True
+            if rising[[self.DPAD_LEFT, self.DPAD_RIGHT, self.L1, self.R1]].any():
+                self._event.skip = True
             if rising[self.PS]:
                 self._release = True
             self._axes, self._buttons = axes, buttons
@@ -532,10 +575,18 @@ class SimConfig:
     control_hz: float = 20.0
     auto_start: bool = False
 
-    # Pure teleop: save N successful demos to ``demo_dir`` and exit.
+    # Pure teleop: save N successful demos to the first ``demo_path`` and exit.
+    # The same ``demo_path`` is also the source of training demos, so there is
+    # only one name for the directory.
     record_demos: int = 0
-    demo_dir: str = "demos/hil_libero"
     demo_path: tuple[str, ...] = ()
+
+    # Base policy that the RL agent learns a residual on top of.
+    # ``dmp`` fits a dynamic movement primitive to the first trajectory found
+    # under ``demo_path`` and appends its next delta-pose action to proprio.
+    base_policy: Literal["none", "dmp"] = "none"
+    dmp_weights_per_dim: int = 20
+    dmp_regularization: float = 0.0
 
     checkpoint_dir: str = "checkpoints/hil/libero"
     keep: int = 20
@@ -578,6 +629,15 @@ class SimConfig:
                 f"max_step_m must be in (0, {_OSC_MAX_M}] and max_step_rad in (0, {_OSC_MAX_RAD}] "
                 "(the OSC controller's full scale)"
             )
+        if self.base_policy not in ("none", "dmp"):
+            raise ValueError(f"base_policy must be 'none' or 'dmp', got {self.base_policy!r}")
+        if self.base_policy == "dmp":
+            if self.record_demos == 0 and not self.demo_path:
+                raise ValueError("--base-policy dmp needs --demo-path with at least one demo pickle")
+            if self.dmp_weights_per_dim <= 1:
+                raise ValueError("dmp_weights_per_dim must be > 1")
+            if self.dmp_regularization < 0.0:
+                raise ValueError("dmp_regularization must be >= 0")
         if self.record_demos > 0 and not self.display:
             raise ValueError("--record-demos needs --display (the browser gamepad page)")
         if self.eval_after_episodes < 0 or self.eval_interval < 0:
@@ -589,16 +649,27 @@ class SimConfig:
         self.encoder = _encoders.EncoderConfig(
             kind="hilserl",
             proprio_dim=self.proprio_dim,
+            base_action_dim=self.base_action_dim,
             image_size=self.image_size,
         )
 
     @property
+    def base_action_dim(self) -> int:
+        """Width of the DMP action appended to proprio (0 when disabled)."""
+        return self.action_dim if self.base_policy == "dmp" else 0
+
+    @property
     def proprio_dim(self) -> int:
-        return 8 + (9 if self.include_velocity else 0)
+        return 8 + (9 if self.include_velocity else 0) + self.base_action_dim
 
     @property
     def action_dim(self) -> int:
         return 7 if self.rotation else 4
+
+    @property
+    def demo_output_dir(self) -> Path:
+        """Directory used by ``--record-demos`` (first ``--demo-path`` entry)."""
+        return Path(self.demo_path[0]) if self.demo_path else Path("demos/hil_libero")
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +683,21 @@ class HilLiberoTrainer:
     def __init__(self, cfg: SimConfig):
         self.cfg = cfg
         self.teleop_only = cfg.record_demos > 0
-        self.obs_adapter = LiberoObsAdapter(cfg.image_size, include_velocity=cfg.include_velocity)
+
+        # The DMP is fit before the observation adapter is built because its
+        # action width is part of the proprio vector.
+        self.base_policy: DmpBasePolicy | None = None
+        if not self.teleop_only and cfg.base_policy == "dmp":
+            self.base_policy = self._make_dmp_base_policy()
+        elif cfg.base_policy == "dmp":
+            print("[dmp] --record-demos is pure teleop; --base-policy is ignored while recording.")
+
+        base_action_dim = cfg.base_action_dim if self.base_policy is not None else 0
+        self.obs_adapter = LiberoObsAdapter(
+            cfg.image_size,
+            include_velocity=cfg.include_velocity,
+            base_action_dim=base_action_dim,
+        )
         scales = (
             *([cfg.max_step_m / _OSC_MAX_M] * 3),
             *([cfg.max_step_rad / _OSC_MAX_RAD] * 3),
@@ -620,9 +705,14 @@ class HilLiberoTrainer:
         )
         self.act_adapter = ActionAdapter(kind="delta_pose", scales=tuple(float(x) for x in scales))
         self.operator = GamepadOperator(cfg.takeover_step, handback_s=cfg.handback_s, rotation=cfg.rotation)
+        base_note = (
+            f" | base policy: DMP ({base_action_dim}-dim delta appended to proprio)"
+            if self.base_policy is not None
+            else ""
+        )
         print(
             f"[action] {cfg.action_dim}-dim agent action ({'6-DoF' if cfg.rotation else 'xyz'} + gripper); "
-            f"normalized +-1 -> {cfg.max_step_m} m / {cfg.max_step_rad} rad per step"
+            f"normalized +-1 -> {cfg.max_step_m} m / {cfg.max_step_rad} rad per step{base_note}"
         )
 
         self.agent = self.actor_agent = None
@@ -646,6 +736,9 @@ class HilLiberoTrainer:
         self._last_hint = 0.0
         self._stats_path = Path(cfg.checkpoint_dir) / "training_stats.json"
         self._load_stats()
+        # The browser status endpoint can be polled before the env worker has
+        # resolved the task language; keep a safe placeholder until then.
+        self.task_name = "loading..."
 
         self._stream: MJPEGServer | None = None
         if cfg.display:
@@ -672,9 +765,12 @@ class HilLiberoTrainer:
             state_norm=None,
             action_norm=None,
         )
+        self.task_name = self.env_worker.task_language(cfg.task_id)
+        print(f"[task] {cfg.suite} task {cfg.task_id}: {self.task_name}")
         if self.teleop_only:
             return
 
+        self._check_checkpoint_config()
         self.agent = _encoders.make_encoder_agent(
             "bc" if cfg.algorithm == "hgdagger" else "sac",
             cfg.encoder,
@@ -742,6 +838,7 @@ class HilLiberoTrainer:
 
     def _status(self) -> dict:
         return {
+            "task": self.task_name,
             "online_episodes": self._online_episodes,
             "demo_episodes": self._demo_episodes,
             "collected_episodes": self._collected_episodes,
@@ -749,6 +846,110 @@ class HilLiberoTrainer:
             "mode": self._mode,
             "learner_step": self._grad_step,
         }
+
+    # -- base policy -------------------------------------------------------
+
+    def _check_checkpoint_config(self) -> None:
+        """Refuse to restore a checkpoint trained with a different obs/action space."""
+        config_path = Path(self.cfg.checkpoint_dir) / "config.json"
+        if not config_path.exists():
+            return
+        try:
+            old = json.loads(config_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        old_encoder = old.get("encoder", {})
+        old_kind = old_encoder.get("kind")
+        old_proprio = old_encoder.get("proprio_dim")
+        old_base_dim = old_encoder.get("base_action_dim")
+        old_action = old.get("action_dim")
+        old_base = old.get("base_policy", "none")
+        if (
+            (old_kind is not None and old_kind != self.cfg.encoder.kind)
+            or (old_proprio is not None and int(old_proprio) != self.cfg.encoder.proprio_dim)
+            or (old_base_dim is not None and int(old_base_dim) != self.cfg.encoder.base_action_dim)
+            or (old_action is not None and int(old_action) != self.cfg.action_dim)
+            or old_base != self.cfg.base_policy
+        ):
+            raise ValueError(
+                f"{config_path} was trained with encoder={old_kind}, proprio_dim={old_proprio}, "
+                f"base_action_dim={old_base_dim}, action_dim={old_action}, base_policy={old_base!r}; "
+                f"this run uses encoder={self.cfg.encoder.kind}, "
+                f"proprio_dim={self.cfg.encoder.proprio_dim}, "
+                f"base_action_dim={self.cfg.encoder.base_action_dim}, "
+                f"action_dim={self.cfg.action_dim}, base_policy={self.cfg.base_policy!r}. "
+                "Use a fresh --checkpoint-dir for the new observation/action space."
+            )
+
+    def _pose_from_state(self, state: np.ndarray) -> np.ndarray:
+        state = np.asarray(state, np.float32).reshape(-1)
+        return state[:6] if self.cfg.rotation else state[:3]
+
+    def _pose(self, obs: dict) -> np.ndarray:
+        return self._pose_from_state(self.obs_adapter.state(obs))
+
+    def _make_dmp_base_policy(self) -> DmpBasePolicy:
+        files = self._demo_files()
+        if not files:
+            raise FileNotFoundError("--base-policy dmp needs at least one demo pickle under --demo-path")
+        source = files[0]
+        with source.open("rb") as f:
+            transitions = pkl.load(f)
+        if not transitions:
+            raise ValueError(f"--base-policy dmp: {source} contains no transitions")
+
+        states = [np.asarray(t["observations"]["state"]) for t in transitions]
+        states.append(np.asarray(transitions[-1]["next_observations"]["state"]))
+        poses = np.stack([self._pose_from_state(s) for s in states])
+        policy = DmpBasePolicy(
+            poses,
+            dt=1.0 / max(self.cfg.control_hz, 1e-6),
+            rotation=self.cfg.rotation,
+            action_dim=self.cfg.action_dim,
+            max_step_m=self.cfg.max_step_m,
+            max_step_rad=self.cfg.max_step_rad,
+            n_weights_per_dim=self.cfg.dmp_weights_per_dim,
+            regularization_coefficient=self.cfg.dmp_regularization,
+        )
+        print(
+            f"[dmp] fit base policy to first demo {source} "
+            f"({len(transitions)} transitions, {len(poses)} pose samples, "
+            f"pose_dim={policy.pose_dim}, weights/dim={self.cfg.dmp_weights_per_dim})"
+        )
+        return policy
+
+    def _base_action(self, obs: dict) -> np.ndarray | None:
+        if self.base_policy is None:
+            return None
+        return self.base_policy.action(self._pose(obs))
+
+    def _append_base_action(self, obs: dict, base_action: np.ndarray) -> dict:
+        out = dict(obs)
+        state = np.asarray(out["state"], np.float32).reshape(-1)
+        out["state"] = np.concatenate([state, np.asarray(base_action, np.float32)])[None]
+        return out
+
+    def _add_base_actions(self, transitions: list[dict]) -> list[dict]:
+        """Expand demo observations with DMP actions and convert actions to residuals."""
+        states = [np.asarray(t["observations"]["state"]) for t in transitions]
+        states.append(np.asarray(transitions[-1]["next_observations"]["state"]))
+        poses = np.stack([self._pose_from_state(s) for s in states])
+        self.base_policy.reset(poses[0])
+        base_actions = np.stack([self.base_policy.action(pose) for pose in poses])
+
+        out = []
+        for i, transition in enumerate(transitions):
+            action = np.asarray(transition["actions"], np.float32).copy()
+            residual = np.clip(action - base_actions[i], -1.0, 1.0).astype(np.float32)
+            out.append(
+                {
+                    **transition,
+                    "observations": self._append_base_action(transition["observations"], base_actions[i]),
+                    "next_observations": self._append_base_action(transition["next_observations"], base_actions[i + 1]),
+                    "actions": residual,
+                }
+            )
+        return out
 
     # -- demos -------------------------------------------------------------
 
@@ -772,6 +973,20 @@ class HilLiberoTrainer:
                 f"{source}: demo actions are {dim}-dim but this run uses {self.cfg.action_dim} "
                 f"(--rotation={self.cfg.rotation}). Record and train with the same --rotation."
             )
+        expected_state_dim = self.obs_adapter.proprio_dim - self.obs_adapter.base_action_dim
+        demo_state_dim = int(np.asarray(transitions[0]["observations"]["state"]).shape[-1])
+        if demo_state_dim != expected_state_dim:
+            raise ValueError(
+                f"{source}: demo states are {demo_state_dim}-dim but this run uses "
+                f"{expected_state_dim} (--include-velocity={self.cfg.include_velocity}). "
+                "Record and train with the same --include-velocity."
+            )
+
+        # With a base policy the stored action is the residual the RL agent
+        # must learn: residual = demonstrated_action - dmp_action.
+        if self.base_policy is not None:
+            transitions = self._add_base_actions(transitions)
+
         if self.cfg.algorithm != "hgdagger":
             return transitions
         out, state = [], -1.0  # LIBERO resets with the gripper open
@@ -809,9 +1024,10 @@ class HilLiberoTrainer:
         """Pure teleop: save successful episodes, one pickle each."""
         if self._stream is None:
             raise RuntimeError("--record-demos needs the browser gamepad page (the stream failed to start)")
-        out = Path(self.cfg.demo_dir)
+        out = self.cfg.demo_output_dir
         saved = attempts = 0
         print(
+            f"[teleop] task {self.cfg.task_id}: {self.task_name}\n"
             f"[teleop] recording {self.cfg.record_demos} successful demos -> {out}\n"
             "[teleop] OPTIONS starts an attempt; the env ends it on success (or OPTIONS marks success); "
             "SHARE or a timeout discards it."
@@ -893,7 +1109,6 @@ class HilLiberoTrainer:
     def _run_episode(self, *, teleop_only: bool = False) -> tuple[list[dict], bool]:
         cfg = self.cfg
         state = self.env_worker.make_pool(train=True, task=cfg.task_id, n_active=1)[0]
-        obs_enc = self.obs_adapter.encode(state.obs)
         episode: list[dict] = []
         grip = -1.0  # commanded gripper state (LIBERO resets open)
         manual_success = manual_failure = False
@@ -901,8 +1116,18 @@ class HilLiberoTrainer:
         self.operator.reset()
         self._mode = "IDLE"
         self._show(state.obs, "IDLE: press OPTIONS", _WHITE)
+
+        # Start the DMP from the actual episode pose and encode its first base
+        # action into the observation the agent sees.
+        base_action = None
+        if self.base_policy is not None:
+            self.base_policy.reset(self._pose(state.obs))
+            base_action = self._base_action(state.obs)
+        obs_enc = self.obs_adapter.encode(state.obs, base_action=base_action)
+
+        print(f"\n[episode] task {cfg.task_id}: {self.task_name}")
         if not (cfg.auto_start or self._stream is None):
-            print("\n[episode] Press OPTIONS to start.")
+            print("[episode] Press OPTIONS to start.")
             while not self.operator.poll().options:
                 self._check_learner()
                 time.sleep(0.02)
@@ -932,24 +1157,34 @@ class HilLiberoTrainer:
                 active = True
 
             if active:
-                action = cmd if cfg.rotation else cmd[[0, 1, 2, 6]]
+                final_action = cmd if cfg.rotation else cmd[[0, 1, 2, 6]]
                 intervened = moving  # idle hold frames are not demos
             else:
-                action = np.array(
+                residual = np.array(
                     self.actor_agent.sample_actions(obs_enc, seed=self._next_key(), argmax=False),
                     np.float32,
                 )
+                final_action = residual if base_action is None else np.clip(base_action + residual, -1.0, 1.0)
                 intervened = False
 
-            action[-1] = _discretize_gripper(float(action[-1]))
-            g = float(action[-1])
+            final_action = np.asarray(final_action, np.float32)
+            final_action[-1] = _discretize_gripper(float(final_action[-1]))
+            g = float(final_action[-1])
             penalty = cfg.grasp_penalty if g not in (0.0, grip) else 0.0
             if g != 0.0:
                 grip = g
             if cfg.algorithm == "hgdagger" and not teleop_only:
-                action[-1] = grip  # BC regresses a persistent open/closed label
+                final_action[-1] = grip  # BC regresses a persistent open/closed label
 
-            state.env.send_step(self._env_action(action, grip))
+            # The buffer stores the residual the RL agent must learn. With a
+            # base policy the executed action is base + residual; without one
+            # the residual is simply the executed action.
+            if base_action is not None:
+                residual_action = np.clip(final_action - base_action, -1.0, 1.0).astype(np.float32)
+            else:
+                residual_action = final_action.copy()
+
+            state.env.send_step(self._env_action(final_action, grip))
             obs, done, info = state.env.recv_step()
             state.obs = obs
             state.steps += 1
@@ -961,17 +1196,18 @@ class HilLiberoTrainer:
             elif done or state.steps >= cfg.max_episode_steps:
                 state.done = True
 
-            next_enc = self.obs_adapter.encode(obs)
+            next_base_action = self._base_action(obs) if self.base_policy is not None else None
+            next_enc = self.obs_adapter.encode(obs, base_action=next_base_action)
             episode.append(
                 {
                     "observations": obs_enc,
-                    "actions": action,
+                    "actions": residual_action,
                     "next_observations": next_enc,
                     "intervened": intervened,
                     "grasp_penalty": penalty,
                 }
             )
-            obs_enc = next_enc
+            obs_enc, base_action = next_enc, next_base_action
             self._env_steps += 1
             self._mode = "HUMAN" if active else "POLICY"
             self._show(state.obs, self._hud or self._label(active=active), _ORANGE if active else _GREEN)
@@ -1125,17 +1361,36 @@ class HilLiberoTrainer:
     def evaluate(self, n_episodes: int, *, iteration: int, tag: str) -> dict:
         agent = self.agent
         successes: list[bool] = []
+        skipped = 0
+        n_attempts = max(1, int(n_episodes))
         self._mode = "EVAL"
-        for i in range(max(1, int(n_episodes))):
-            state = self.env_worker.make_pool(
-                train=False, task=self.cfg.task_id, n_active=1, trial_offset=i
-            )[0]
-            obs_enc = self.obs_adapter.encode(state.obs)
+        print(
+            f"[eval {tag}] task {self.cfg.task_id}: {self.task_name} | {n_attempts} episodes "
+            "(D-pad left/right or L1/R1 skips the current episode)"
+        )
+        for i in range(n_attempts):
+            state = self.env_worker.make_pool(train=False, task=self.cfg.task_id, n_active=1, trial_offset=i)[0]
+
+            # Clear stale pad events and re-anchor the DMP for this episode.
+            self.operator.reset()
+            base_action = None
+            if self.base_policy is not None:
+                self.base_policy.reset(self._pose(state.obs))
+                base_action = self._base_action(state.obs)
+            obs_enc = self.obs_adapter.encode(state.obs, base_action=base_action)
             frames = [self.obs_adapter.display(state.obs)]
             grip = -1.0
+            skipped_this = False
+
             while not state.done:
                 self._check_learner()
-                action = np.array(agent.sample_actions(obs_enc, seed=self._next_key(), argmax=True), np.float32)
+                event = self.operator.poll()
+                if event.skip:
+                    skipped_this = True
+                    break
+
+                residual = np.array(agent.sample_actions(obs_enc, seed=self._next_key(), argmax=True), np.float32)
+                action = residual if base_action is None else np.clip(base_action + residual, -1.0, 1.0)
                 g = _discretize_gripper(float(action[-1]))
                 if g != 0.0:
                     grip = g
@@ -1151,11 +1406,21 @@ class HilLiberoTrainer:
                     state.done = True
                 elif done or state.steps >= self.cfg.max_episode_steps:
                     state.done = True
-                obs_enc = self.obs_adapter.encode(obs)
+
+                next_base_action = self._base_action(obs) if self.base_policy is not None else None
+                obs_enc = self.obs_adapter.encode(obs, base_action=next_base_action)
+                base_action = next_base_action
                 frames.append(self.obs_adapter.display(obs))
-                self._show(state.obs, f"EVAL L{self._grad_step}", _WHITE)
-            successes.append(bool(state.success))
-            self._save_video(frames, tag=f"{tag}_s{i}", success=bool(state.success))
+                self._show(state.obs, f"EVAL L{self._grad_step} | {self.task_name}", _WHITE)
+
+            if skipped_this:
+                skipped += 1
+                self._show(state.obs, f"EVAL SKIPPED L{self._grad_step}", _ORANGE)
+                print(f"[eval {tag}] episode {i + 1}/{n_attempts} skipped by operator")
+                self._save_video(frames, tag=f"{tag}_s{i}", success=False, skipped=True)
+            else:
+                successes.append(bool(state.success))
+                self._save_video(frames, tag=f"{tag}_s{i}", success=bool(state.success))
 
         rate = float(np.mean(successes)) if successes else 0.0
         result = {
@@ -1163,12 +1428,14 @@ class HilLiberoTrainer:
             "iteration": iteration,
             "success_rate": rate,
             "n": len(successes),
+            "skipped": skipped,
+            "attempted": n_attempts,
             "online_episodes": self._online_episodes,
             "demo_episodes": self._demo_episodes,
             "collected_episodes": self._collected_episodes,
             "training_seconds": round(self._elapsed_seconds(), 1),
         }
-        print(f"[eval {tag}] success={rate:.2f} n={len(successes)}")
+        print(f"[eval {tag}] success={rate:.2f} n={len(successes)} skipped={skipped}")
         with self._eval_log.open("a") as f:
             f.write(json.dumps(result) + "\n")
         self._mode = "IDLE"
@@ -1184,10 +1451,17 @@ class HilLiberoTrainer:
         if self._stream is not None:
             self._stream.update(self.obs_adapter.display(obs), label, color)
 
-    def _save_video(self, frames: list[np.ndarray], *, tag: str, success: bool) -> None:
+    def _save_video(
+        self,
+        frames: list[np.ndarray],
+        *,
+        tag: str,
+        success: bool,
+        skipped: bool = False,
+    ) -> None:
         if not frames:
             return
-        suffix = "success" if success else "failure"
+        suffix = "skipped" if skipped else ("success" if success else "failure")
         path = Path(self.cfg.video_dir) / f"{tag}_{suffix}.mp4"
         try:
             imageio.mimsave(path, frames, fps=max(self.cfg.control_hz, 1.0))
