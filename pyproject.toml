@@ -77,6 +77,8 @@ libero = [
     "future>=1.0.0",
     "thop>=0.1.1",
     "gym==0.25.2",
+    "movement-primitives>=0.9.1",
+    "pytransform3d",
 ]
 
 [tool.uv]

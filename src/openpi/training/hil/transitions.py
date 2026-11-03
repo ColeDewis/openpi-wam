@@ -13,18 +13,26 @@ A transition is a plain dict:
 
 Directories:
     <root>/online   every transition (RLPD's online buffer)
-    <root>/demo     intervened transitions only (RLPD's demo buffer and
-                    HG-Dagger's entire dataset)
+    <root>/demo     intervened transitions, or all bottleneck-section
+                    transitions when bottleneck labels are used
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 import pickle as pkl
 import time
 
 import numpy as np
+
+
+@dataclasses.dataclass
+class Demo:
+    transitions: list[dict]
+    bottlenecks: list[dict]
+    metadata: dict
 
 
 def make_transition(observations, actions, next_observations, reward, done, intervened, grasp_penalty=0.0):
@@ -51,6 +59,45 @@ def save_transitions(directory: Path | str, transitions: list[dict]) -> Path | N
     return path
 
 
+def save_demo(
+    directory: Path | str,
+    transitions: list[dict],
+    *,
+    bottlenecks: list[dict] | None = None,
+    metadata: dict | None = None,
+) -> Path | None:
+    """Save a teleop demo with its bottleneck-section labels.
+
+    Old demo pickles are plain lists of transitions; the bottleneck-aware
+    format wraps them in a dict so the section boundaries and the full MuJoCo
+    states needed to restore each section start travel with the transitions.
+    """
+    if not transitions:
+        return None
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"demo_{time.time_ns()}_{os.getpid()}.pkl"
+    payload = {
+        "format": "bottleneck_demo_v1",
+        "transitions": transitions,
+        "bottlenecks": list(bottlenecks or []),
+    }
+    if metadata:
+        payload.update(metadata)
+    with path.open("wb") as f:
+        pkl.dump(payload, f)
+    return path
+
+
+def load_demo(path: Path | str) -> Demo:
+    """Load either an old list-format demo or the bottleneck-aware dict format."""
+    with Path(path).open("rb") as f:
+        data = pkl.load(f)
+    if isinstance(data, dict) and "transitions" in data:
+        return Demo(list(data["transitions"]), list(data.get("bottlenecks", ())), data)
+    return Demo(list(data), [], {})
+
+
 def sync_transitions(directory: Path | str, seen: set[str], data_store=None) -> int:
     """Insert pickles not seen before into ``data_store`` (or just count them)."""
     directory = Path(directory)
@@ -61,8 +108,7 @@ def sync_transitions(directory: Path | str, seen: set[str], data_store=None) -> 
         if str(path) in seen:
             continue
         seen.add(str(path))
-        with path.open("rb") as f:
-            transitions = pkl.load(f)
+        transitions = load_demo(path).transitions
         if data_store is not None:
             for transition in transitions:
                 data_store.insert(transition)

@@ -2451,6 +2451,12 @@ wheels = [
 ]
 
 [[package]]
+name = "movement-primitives"
+version = "0.9.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/c9/325989a78f0e70646d4b721f2e783942ce8727fc502b21560bae9f06122e/movement_primitives-0.9.1.tar.gz", hash = "sha256:e674f09eea7899e3a4d23af3d6f959d962696d2ea17eab51bdb4c00cf92738c2", size = 9762180, upload-time = "2025-05-17T07:18:35.435Z" }
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3366,7 +3372,9 @@ libero = [
     { name = "future" },
     { name = "gym" },
     { name = "hydra-core" },
+    { name = "movement-primitives" },
     { name = "mujoco" },
+    { name = "pytransform3d" },
     { name = "robosuite" },
     { name = "thop" },
 ]
@@ -3413,6 +3421,7 @@ requires-dist = [
     { name = "jaxtyping", specifier = "==0.2.36" },
     { name = "lerobot", git = "https://github.com/huggingface/lerobot?rev=0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" },
     { name = "ml-collections", specifier = "==1.0.0" },
+    { name = "movement-primitives", marker = "extra == 'libero'", specifier = ">=0.9.1" },
     { name = "mujoco", marker = "extra == 'libero'", specifier = "==3.2.3" },
     { name = "numpy", specifier = ">=1.26.4" },
     { name = "numpydantic", specifier = "==1.8.0" },
@@ -3422,6 +3431,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=11.0.0" },
     { name = "polars", specifier = ">=1.30.0" },
     { name = "protobuf", specifier = ">=4.25.8" },
+    { name = "pytransform3d", marker = "extra == 'libero'" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "robosuite", marker = "extra == 'libero'", specifier = "==1.4.0" },
     { name = "sentencepiece", specifier = ">=0.2.0" },
@@ -4235,6 +4245,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/86/f5/8c0653e5bb54e0cbdfe27bf32d41f27bc4e12faa8742778c17f2a71be2c0/python-xlib-0.33.tar.gz", hash = "sha256:55af7906a2c75ce6cb280a584776080602444f75815a7aff4d287bb2d7018b32", size = 269068, upload-time = "2022-12-25T18:53:00.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fc/b8/ff33610932e0ee81ae7f1269c890f697d56ff74b9f5b2ee5d9b7fa2c5355/python_xlib-0.33-py2.py3-none-any.whl", hash = "sha256:c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398", size = 182185, upload-time = "2022-12-25T18:52:58.662Z" },
+]
+
+[[package]]
+name = "pytransform3d"
+version = "3.17.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lxml" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/cb/bca3f2cba6b465517df2dcede0f11c50b77851b3a468f641ca5b8417da62/pytransform3d-3.17.0.tar.gz", hash = "sha256:f43d525751f02d12fa785d48348e842b6cfe2d5d1c9c09301b23a682c42e4afb", size = 8349388, upload-time = "2026-10-06T07:27:52.673Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/0a/924e5134fcc42f334bc2f2d5235ed9634ece56b67fe7567c476a6d0f7525/pytransform3d-3.17.0-py3-none-any.whl", hash = "sha256:c96b46d22ace4e616ead7ecbdedcf66ec77b70fa610fcd0826995755849b95d5", size = 172201, upload-time = "2026-10-06T07:27:29.055Z" },
 ]
 
 [[package]]

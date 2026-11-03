@@ -113,9 +113,9 @@ def save_run_config(cfg: LearnerConfig) -> None:
         "encoder": dataclasses.asdict(cfg.encoder),
         "base_policy": getattr(cfg, "base_policy", "none"),
         "base_action_dim": getattr(cfg, "base_action_dim", 0),
+        "bottleneck_label": bool(getattr(cfg, "bottleneck_label", False)),
         "dmp_gripper": bool(getattr(cfg, "dmp_gripper", False)),
-        "residual_blend_scale": float(getattr(cfg, "residual_blend_scale", 1.0)),
-        "residual_min_base_weight": float(getattr(cfg, "residual_min_base_weight", 0.0)),
+        "residual_max": float(getattr(cfg, "residual_max", 1.0)),
     }
     (Path(cfg.checkpoint_dir) / "config.json").write_text(json.dumps(payload, indent=2))
 

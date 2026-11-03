@@ -1,39 +1,20 @@
 """LIBERO actor/learner for RLPD and HG-Dagger.
 
-The actor runs in the main thread and steps LIBERO. The learner runs in a
-background thread and publishes weights every ``steps_per_update`` steps, as in
-hil-serl. Human interventions come from the browser gamepad page served by the
-optional MJPEG stream.
+The actor steps LIBERO in the main thread; the learner runs in the background
+and publishes weights every ``steps_per_update`` steps. Human interventions
+come from the browser gamepad page.
 
-Record demos (pure teleop, one pickle per successful episode):
-
+Record:
     uv run --extra libero scripts/train_hil_libero.py --record-demos 20 \
-        --demo-path /home/serg/projects/openpi-wam/demos/goal_t1 --suite libero_goal --task-id 1
+        --bottleneck-label --demo-path demos/goal_t1 --suite libero_goal --task-id 1
 
-Train (resumes from the latest checkpoint in ``--checkpoint-dir``):
-
+Train:
     uv run --extra libero scripts/train_hil_libero.py --algorithm rlpd \
-        --suite libero_goal --task-id 1 \
-        --demo-path /home/serg/projects/openpi-wam/demos/goal_t1 \
-        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_rlpd \
-        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/rlpd_goal_t1
+        --base-policy dmp --demo-path demos/goal_t1 --suite libero_goal --task-id 1
 
-Train a residual policy on top of a DMP base policy. The DMP is fit to the
-first trajectory found under ``--demo-path``; the RL agent sees the DMP's next
-delta-pose action in proprio and learns only the residual:
-
-    uv run --extra libero scripts/train_hil_libero.py --algorithm rlpd \
-        --suite libero_goal --task-id 1 \
-        --base-policy dmp \
-        --demo-path /home/serg/projects/openpi-wam/demos/goal_t1 \
-        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_rlpd_dmp \
-        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/rlpd_goal_t1_dmp
-
-Controls: OPTIONS starts an episode / marks success, SHARE marks failure,
-left stick moves x/y, triangle/cross moves z, L2/R2 opens/closes the gripper,
-and PS hands control back to the policy. D-pad left/right (or L1/R1) skips the
-current eval episode. The right stick and square/circle control rotation only
-with ``--rotation``.
+Controls: OPTIONS/SHARE mark success/failure, D-pad up/down selects a
+bottleneck, D-pad left/right marks sections while recording and skips eval
+otherwise, L1/R1 skip eval, PS hands control back to the policy.
 """
 
 # The MuJoCo backend and third_party/libero must be configured before importing
@@ -50,7 +31,6 @@ import json
 import math
 import os
 from pathlib import Path
-import pickle as pkl
 import sys
 import threading
 import time
@@ -75,10 +55,12 @@ from openpi.models.tokenizer import PaligemmaTokenizer
 from openpi.training.hil import encoders as _encoders
 from openpi.training.hil import learner as _learner
 from openpi.training.hil.action_adapter import ActionAdapter
-from openpi.training.hil.dmp import DmpBasePolicy
+from openpi.training.hil.dmp import DmpPolicy
 from openpi.training.hil.dmp import combine_base_residual
-from openpi.training.hil.dmp import residual_from_final
+from openpi.training.hil.dmp import residual_target
+from openpi.training.hil.transitions import load_demo
 from openpi.training.hil.transitions import make_transition
+from openpi.training.hil.transitions import save_demo
 from openpi.training.hil.transitions import save_transitions
 from openpi.training.rlt import envs as _envs
 
@@ -209,7 +191,7 @@ _PAD_HTML = """<!doctype html>
 <div id="view"><img src="/stream.mjpg" alt="LIBERO stream"></div>
 <div id="help">
  <div id="pad" class="bad">controller: none - focus this tab and press any button on the pad</div>
- <div id="status">task: loading... | online episodes: 0 | demo episodes: 0 | collected episodes: 0 | training: 00:00:00</div>
+ <div id="status">task: loading... | online episodes: 0 | demo episodes: 0 | collected episodes: 0 | training: 00:00:00 | bottleneck: off</div>
  <div id="grid">
   <div><b>OPTIONS</b> start episode / mark <b>SUCCESS</b></div>
   <div><b>SHARE</b> mark <b>FAILURE</b></div>
@@ -218,7 +200,9 @@ _PAD_HTML = """<!doctype html>
   <div><b>&#9651; / &#10005;</b> z up / z down</div>
   <div><b>&#9633; / &#9675;</b> roll left / right <span class="dim">(only with --rotation)</span></div>
   <div><b>L2 / R2</b> gripper open / close (release = hold)</div>
-  <div><b>D-pad &#9664; / &#9654;</b> (or L1 / R1) skip current eval episode</div>
+  <div><b>D-pad &#9664; / &#9654;</b> bottleneck start / end <span class="dim">(recording with --bottleneck-label)</span> or skip eval <span class="dim">(otherwise)</span></div>
+  <div><b>D-pad &#9650; / &#9660;</b> select bottleneck <span class="dim">(training B1..BN; eval B0..BN)</span></div>
+  <div><b>L1 / R1</b> skip current eval episode</div>
   <div><b>PS</b> hand control back to the policy</div>
   <div class="dim">first stick/trigger/button input = human takeover; the policy stays off until PS</div>
  </div>
@@ -264,7 +248,8 @@ async function pollStatus() {
     document.getElementById("status").textContent =
       "task: " + s.task + " | online episodes: " + s.online_episodes + " | demo episodes: " + s.demo_episodes +
       " | collected episodes: " + s.collected_episodes +
-      " | training: " + s.training + " | " + s.mode + " | learner step " + s.learner_step;
+      " | training: " + s.training + " | " + s.mode + " | learner step " + s.learner_step +
+      " | bottleneck: " + s.bottleneck;
   } catch (e) {}
 }
 setInterval(tick, 33);
@@ -404,9 +389,13 @@ class MJPEGServer:
 
 @dataclasses.dataclass
 class PadEvent:
-    options: bool = False  # OPTIONS: start (idle) / mark success (recording)
+    options: bool = False  # OPTIONS: start (idle) / mark success (recording or bottleneck training)
     share: bool = False  # SHARE: mark failure
-    skip: bool = False  # D-pad left/right or L1/R1: skip the current eval episode
+    skip: bool = False  # L1/R1 (and D-pad left/right outside bottleneck-label mode): skip eval
+    bottleneck_start: bool = False  # D-pad left: start a bottleneck section while recording
+    bottleneck_end: bool = False  # D-pad right: end a bottleneck section while recording
+    prev_bottleneck: bool = False  # D-pad up: previous bottleneck state (B0 = full task)
+    next_bottleneck: bool = False  # D-pad down: next bottleneck state
 
 
 class GamepadOperator:
@@ -421,7 +410,7 @@ class GamepadOperator:
     L1, R1 = 4, 5
     L2, R2 = 6, 7
     SHARE, OPTIONS = 8, 9
-    DPAD_LEFT, DPAD_RIGHT = 14, 15
+    DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT = 12, 13, 14, 15
     PS = 16
     N_BUTTONS = 18
 
@@ -433,8 +422,10 @@ class GamepadOperator:
         handback_s: float = 0.0,
         *,
         rotation: bool = True,
+        bottleneck_label: bool = False,
     ):
         self.rotation = bool(rotation)
+        self.bottleneck_label = bool(bottleneck_label)
         self.takeover_step = float(takeover_step)
         self.deadzone = float(deadzone)
         self.stale_s = float(stale_s)
@@ -462,8 +453,18 @@ class GamepadOperator:
                 self._event.options = True
             if rising[self.SHARE]:
                 self._event.share = True
-            if rising[[self.DPAD_LEFT, self.DPAD_RIGHT, self.L1, self.R1]].any():
+            if rising[self.DPAD_LEFT]:
+                self._event.bottleneck_start = self.bottleneck_label
+                self._event.skip = not self.bottleneck_label
+            if rising[self.DPAD_RIGHT]:
+                self._event.bottleneck_end = self.bottleneck_label
+                self._event.skip = not self.bottleneck_label
+            if rising[[self.L1, self.R1]].any():
                 self._event.skip = True
+            if rising[self.DPAD_UP]:
+                self._event.prev_bottleneck = True
+            if rising[self.DPAD_DOWN]:
+                self._event.next_bottleneck = True
             if rising[self.PS]:
                 self._release = True
             self._axes, self._buttons = axes, buttons
@@ -586,30 +587,25 @@ class SimConfig:
     control_hz: float = 20.0
     auto_start: bool = False
 
-    # Pure teleop: save N successful demos to the first ``demo_path`` and exit.
-    # The same ``demo_path`` is also the source of training demos, so there is
-    # only one name for the directory.
     record_demos: int = 0
+    """Pure teleop: save N successful demos to the first --demo-path and exit."""
     demo_path: tuple[str, ...] = ()
+    """Demo source for training; the first entry receives --record-demos."""
+    bottleneck_label: bool = False
+    """During teleop, D-pad left/right marks bottleneck start/end.
 
-    # Base policy that the RL agent learns a residual on top of.
-    # ``dmp`` fits a dynamic movement primitive to the first trajectory found
-    # under ``demo_path`` and appends its next delta-pose action to proprio.
+    The full simulator state and gripper command are saved at each section
+    start.  A demo with no marks is treated as one full-task section.
+    """
+
     base_policy: Literal["none", "dmp"] = "none"
     dmp_weights_per_dim: int = 20
     dmp_regularization: float = 0.0
     dmp_gripper: bool = True
-    """Include the demonstrated gripper command as a DMP dimension.  Its base
-    action is the absolute normalized gripper target; the RL residual is added
-    on top with the same residual-driven weighting as the arm dims."""
+    """Model the demonstrated gripper command as an extra DMP dimension."""
 
-    # Base/residual composition.  The base action is scaled by
-    # ``1 - |residual| / residual_blend_scale`` per dimension (clipped to
-    # ``residual_min_base_weight``), then the residual is added.  A small
-    # residual therefore leaves the base in charge; a large residual suppresses
-    # it.  This is the sim stand-in for the real robot's ``policy_torque_scale``.
-    residual_blend_scale: float = 1.0
-    residual_min_base_weight: float = 0.0
+    residual_max: float = 1.0
+    """Maximum residual magnitude used by the base/residual blend."""
 
     # Start-state perturbations from the LIBERO init states.  The EEF start is
     # perturbed +-xyz; movable objects are perturbed +-xy only, keeping z fixed
@@ -656,8 +652,6 @@ class SimConfig:
         if self.suite not in _MAX_STEPS:
             raise ValueError(f"unknown LIBERO suite {self.suite!r}; expected one of {tuple(_MAX_STEPS)}")
         self.image_size = tuple(self.image_size)
-        if len(self.image_size) != 2:
-            raise ValueError(f"image_size must be (height, width), got {self.image_size}")
         self.demo_path = tuple(self.demo_path)
         self.max_episode_steps = int(self.max_episode_steps) or _MAX_STEPS[self.suite]
         self.max_env_steps = int(self.max_env_steps) or self.max_episodes * self.max_episode_steps
@@ -666,27 +660,12 @@ class SimConfig:
                 f"max_step_m must be in (0, {_OSC_MAX_M}] and max_step_rad in (0, {_OSC_MAX_RAD}] "
                 "(the OSC controller's full scale)"
             )
-        if self.base_policy not in ("none", "dmp"):
-            raise ValueError(f"base_policy must be 'none' or 'dmp', got {self.base_policy!r}")
-        if self.base_policy == "dmp":
-            if self.record_demos == 0 and not self.demo_path:
-                raise ValueError("--base-policy dmp needs --demo-path with at least one demo pickle")
-            if self.dmp_weights_per_dim <= 1:
-                raise ValueError("dmp_weights_per_dim must be > 1")
-            if self.dmp_regularization < 0.0:
-                raise ValueError("dmp_regularization must be >= 0")
-        if self.residual_blend_scale <= 0.0:
-            raise ValueError("residual_blend_scale must be positive")
-        if not (0.0 <= self.residual_min_base_weight <= 1.0):
-            raise ValueError("residual_min_base_weight must be in [0, 1]")
-        if self.perturb_eef_xyz_m < 0.0 or self.perturb_object_xy_m < 0.0:
-            raise ValueError("perturbation magnitudes must be >= 0")
-        if not (0.0 <= self.perturb_after_success_rate <= 1.0):
-            raise ValueError("perturb_after_success_rate must be in [0, 1]")
+        if self.base_policy == "dmp" and self.record_demos == 0 and not self.demo_path:
+            raise ValueError("--base-policy dmp needs --demo-path")
+        if self.residual_max <= 0.0:
+            raise ValueError("residual_max must be positive")
         if self.record_demos > 0 and not self.display:
-            raise ValueError("--record-demos needs --display (the browser gamepad page)")
-        if self.eval_after_episodes < 0 or self.eval_interval < 0:
-            raise ValueError("eval_after_episodes and eval_interval must be >= 0")
+            raise ValueError("--record-demos needs --display")
         Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         Path(self.video_dir).mkdir(parents=True, exist_ok=True)
         if self.eval_only and checkpoints.latest_checkpoint(self.checkpoint_dir) is None:
@@ -722,6 +701,28 @@ class SimConfig:
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass(frozen=True)
+class Bottleneck:
+    """A contiguous slice of the first demo, in transition indices."""
+
+    start: int
+    end: int
+    start_state: np.ndarray
+    start_grip: float
+
+    @property
+    def n_steps(self) -> int:
+        return self.end - self.start
+
+
+@dataclasses.dataclass
+class EpisodeResult:
+    transitions: list[dict]
+    success: bool
+    frames: list[np.ndarray]
+    skipped: bool = False
+
+
 class HilLiberoTrainer:
     """Actor in the main thread, learner in a background thread."""
 
@@ -729,15 +730,25 @@ class HilLiberoTrainer:
         self.cfg = cfg
         self.teleop_only = cfg.record_demos > 0
 
-        # The DMP is fit before the observation adapter is built because its
-        # action width is part of the proprio vector.
-        self.base_policy: DmpBasePolicy | None = None
+        self.bottlenecks: list[Bottleneck] = []
+        self.bottleneck_mode = False
+        self.train_selected: int | None = None
+        self.eval_selected: int | None = None
+        self._episode_train_idx: int | None = None
+        self._episode_eval_idx: int | None = None
+        self._episode_is_train = True
+        self._active_section_idx: int | None = None
+        self._recording_sections: list[dict] = []
+        self._recording_open: dict | None = None
+
+        self.full_dmp: DmpPolicy | None = None
+        self.section_dmps: list[DmpPolicy] = []
         if not self.teleop_only and cfg.base_policy == "dmp":
-            self.base_policy = self._make_dmp_base_policy()
+            self._load_bottleneck_specs()
         elif cfg.base_policy == "dmp":
             print("[dmp] --record-demos is pure teleop; --base-policy is ignored while recording.")
 
-        base_action_dim = cfg.base_action_dim if self.base_policy is not None else 0
+        base_action_dim = 0 if self.teleop_only else cfg.base_action_dim
         self.obs_adapter = LiberoObsAdapter(
             cfg.image_size,
             include_velocity=cfg.include_velocity,
@@ -749,13 +760,20 @@ class HilLiberoTrainer:
             1.0,
         )
         self.act_adapter = ActionAdapter(kind="delta_pose", scales=tuple(float(x) for x in scales))
-        self.operator = GamepadOperator(cfg.takeover_step, handback_s=cfg.handback_s, rotation=cfg.rotation)
-        base_note = (
-            f" | base policy: DMP ({base_action_dim}-dim base action appended to proprio, "
-            f"gripper={'modeled' if cfg.dmp_gripper else 'residual-only'})"
-            if self.base_policy is not None
-            else ""
+        self.operator = GamepadOperator(
+            cfg.takeover_step,
+            handback_s=cfg.handback_s,
+            rotation=cfg.rotation,
+            bottleneck_label=cfg.bottleneck_label and self.teleop_only,
         )
+        base_note = ""
+        if cfg.base_policy == "dmp" and not self.teleop_only:
+            base_note = (
+                f" | base policy: DMP ({base_action_dim}-dim base action appended to proprio, "
+                f"gripper={'modeled' if cfg.dmp_gripper else 'residual-only'})"
+            )
+            if self.bottleneck_mode:
+                base_note += f" | bottleneck mode: {len(self.bottlenecks)} section(s)"
         print(
             f"[action] {cfg.action_dim}-dim agent action ({'6-DoF' if cfg.rotation else 'xyz'} + gripper); "
             f"normalized +-1 -> {cfg.max_step_m} m / {cfg.max_step_rad} rad per step{base_note}"
@@ -764,6 +782,7 @@ class HilLiberoTrainer:
         self.agent = self.actor_agent = None
         self.online = self.demo = None
         self._hud = ""
+        self._teleop_base_hud = ""
         self._mode = "IDLE"
         self._grad_step = 0
         self._updates = 0
@@ -887,6 +906,30 @@ class HilLiberoTrainer:
         }
         self._stats_path.write_text(json.dumps(payload, indent=2))
 
+    def _bottleneck_status(self) -> str:
+        if self.teleop_only:
+            if not self.cfg.bottleneck_label:
+                return "off"
+            n = len(self._recording_sections)
+            if self._recording_open is not None:
+                return f"recording: {n} marked, B{n + 1} open"
+            return f"recording: {n} marked section(s)"
+        if not self.bottleneck_mode:
+            return "off"
+        selected = self.train_selected if self._episode_is_train else self.eval_selected
+        if self._mode == "IDLE":
+            return self._selection_label(selected)
+        idx = self._episode_train_idx if self._episode_is_train else self._episode_eval_idx
+        current = self._selection_label(idx)
+        if selected != idx:
+            current += f" | next: {self._selection_label(selected)}"
+        return current
+
+    def _selection_label(self, idx: int | None) -> str:
+        if idx is None:
+            return "B0 full task"
+        return f"B{idx + 1}/{len(self.bottlenecks)}"
+
     def _status(self) -> dict:
         return {
             "task": self.task_name,
@@ -896,6 +939,7 @@ class HilLiberoTrainer:
             "training": self._elapsed(),
             "mode": self._mode,
             "learner_step": self._grad_step,
+            "bottleneck": self._bottleneck_status(),
         }
 
     # -- base policy -------------------------------------------------------
@@ -905,10 +949,7 @@ class HilLiberoTrainer:
         config_path = Path(self.cfg.checkpoint_dir) / "config.json"
         if not config_path.exists():
             return
-        try:
-            old = json.loads(config_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return
+        old = json.loads(config_path.read_text())
         old_encoder = old.get("encoder", {})
         old_kind = old_encoder.get("kind")
         old_proprio = old_encoder.get("proprio_dim")
@@ -916,8 +957,7 @@ class HilLiberoTrainer:
         old_action = old.get("action_dim")
         old_base = old.get("base_policy", "none")
         old_gripper = old.get("dmp_gripper")
-        old_blend = old.get("residual_blend_scale")
-        old_min_weight = old.get("residual_min_base_weight")
+        old_residual_max = old.get("residual_max")
         if (
             (old_kind is not None and old_kind != self.cfg.encoder.kind)
             or (old_proprio is not None and int(old_proprio) != self.cfg.encoder.proprio_dim)
@@ -925,25 +965,11 @@ class HilLiberoTrainer:
             or (old_action is not None and int(old_action) != self.cfg.action_dim)
             or old_base != self.cfg.base_policy
             or (old_gripper is not None and bool(old_gripper) != self.cfg.dmp_gripper)
-            or (old_blend is not None and abs(float(old_blend) - self.cfg.residual_blend_scale) > 1e-9)
-            or (
-                old_min_weight is not None
-                and abs(float(old_min_weight) - self.cfg.residual_min_base_weight) > 1e-9
-            )
+            or (old_residual_max is not None and abs(float(old_residual_max) - self.cfg.residual_max) > 1e-9)
         ):
             raise ValueError(
-                f"{config_path} was trained with encoder={old_kind}, proprio_dim={old_proprio}, "
-                f"base_action_dim={old_base_dim}, action_dim={old_action}, base_policy={old_base!r}, "
-                f"dmp_gripper={old_gripper}, residual_blend_scale={old_blend}, "
-                f"residual_min_base_weight={old_min_weight}; "
-                f"this run uses encoder={self.cfg.encoder.kind}, "
-                f"proprio_dim={self.cfg.encoder.proprio_dim}, "
-                f"base_action_dim={self.cfg.encoder.base_action_dim}, "
-                f"action_dim={self.cfg.action_dim}, base_policy={self.cfg.base_policy!r}, "
-                f"dmp_gripper={self.cfg.dmp_gripper}, "
-                f"residual_blend_scale={self.cfg.residual_blend_scale}, "
-                f"residual_min_base_weight={self.cfg.residual_min_base_weight}. "
-                "Use a fresh --checkpoint-dir for the new observation/action space."
+                f"{config_path} was trained with a different observation/action space; "
+                "use a fresh --checkpoint-dir"
             )
 
     def _pose_from_state(self, state: np.ndarray) -> np.ndarray:
@@ -954,35 +980,38 @@ class HilLiberoTrainer:
         return self._pose_from_state(self.obs_adapter.state(obs))
 
     def _pose_with_grip(self, obs: dict, grip: float) -> np.ndarray:
-        """DMP pose plus the current commanded gripper state, when modeled."""
         pose = self._pose(obs)
         if self.cfg.dmp_gripper:
             pose = np.concatenate([pose, np.asarray([grip], np.float32)])
         return pose
 
-    def _make_dmp_base_policy(self) -> DmpBasePolicy:
-        files = self._demo_files()
-        if not files:
-            raise FileNotFoundError("--base-policy dmp needs at least one demo pickle under --demo-path")
-        source = files[0]
-        with source.open("rb") as f:
-            transitions = pkl.load(f)
-        if not transitions:
-            raise ValueError(f"--base-policy dmp: {source} contains no transitions")
-
-        actions = [np.asarray(t["actions"], np.float32) for t in transitions]
-        states = [np.asarray(t["observations"]["state"]) for t in transitions]
-        states.append(np.asarray(transitions[-1]["next_observations"]["state"]))
-        poses = np.stack([self._pose_from_state(s) for s in states])
+    def _trajectory_for_slice(
+        self,
+        transitions: list[dict],
+        start: int,
+        end: int,
+        start_grip: float,
+    ) -> np.ndarray:
+        actions = [np.asarray(t["actions"], np.float32) for t in transitions[start:end]]
+        states = [np.asarray(t["observations"]["state"]) for t in transitions[start:end]]
+        boundary = transitions[end]["observations"]["state"] if end < len(transitions) else transitions[-1]["next_observations"]["state"]
+        states.append(boundary)
+        poses = np.stack([self._pose_from_state(state) for state in states])
         if self.cfg.dmp_gripper:
-            # State i sees the gripper command applied at i-1; state 0 starts open
-            # (LIBERO resets with gripper=-1).  This aligns each DMP target with
-            # the next demonstrated action's gripper entry.
-            grip_states = np.concatenate([[-1.0], [float(a[-1]) for a in actions]])
-            poses = np.concatenate([poses, grip_states[:, None]], axis=1)
-        policy = DmpBasePolicy(
-            poses,
-            dt=1.0 / max(self.cfg.control_hz, 1e-6),
+            grips = np.concatenate([[float(start_grip)], [float(action[-1]) for action in actions]])
+            poses = np.column_stack([poses, grips])
+        return poses
+
+    def _make_dmp(
+        self,
+        transitions: list[dict],
+        start: int,
+        end: int,
+        start_grip: float,
+    ) -> DmpPolicy:
+        return DmpPolicy(
+            self._trajectory_for_slice(transitions, start, end, start_grip),
+            dt=1.0 / self.cfg.control_hz,
             rotation=self.cfg.rotation,
             gripper=self.cfg.dmp_gripper,
             action_dim=self.cfg.action_dim,
@@ -991,54 +1020,205 @@ class HilLiberoTrainer:
             n_weights_per_dim=self.cfg.dmp_weights_per_dim,
             regularization_coefficient=self.cfg.dmp_regularization,
         )
+
+    def _validate_demo_dims(self, transitions: list[dict], source: str) -> None:
+        dim = int(np.asarray(transitions[0]["actions"]).shape[-1])
+        if dim != self.cfg.action_dim:
+            raise ValueError(f"{source}: demo actions are {dim}-dim, expected {self.cfg.action_dim}")
+        expected_state_dim = 8 + (9 if self.cfg.include_velocity else 0)
+        demo_state_dim = int(np.asarray(transitions[0]["observations"]["state"]).shape[-1])
+        if demo_state_dim != expected_state_dim:
+            raise ValueError(f"{source}: demo states are {demo_state_dim}-dim, expected {expected_state_dim}")
+
+    def _load_bottleneck_specs(self) -> None:
+        files = self._demo_files()
+        if not files:
+            raise FileNotFoundError("--base-policy dmp needs at least one demo pickle")
+        source = files[0]
+        for path in files:
+            if "bottlenecks" in load_demo(path).metadata:
+                source = path
+                break
+        demo = load_demo(source)
+        transitions = demo.transitions
+        if not transitions:
+            raise ValueError(f"{source}: demo is empty")
+        self._validate_demo_dims(transitions, str(source))
+
+        meta_task = demo.metadata.get("task_id")
+        if meta_task is not None and int(meta_task) != self.cfg.task_id:
+            raise ValueError(f"{source}: recorded task {meta_task}, training task {self.cfg.task_id}")
+        meta_suite = demo.metadata.get("suite")
+        if meta_suite is not None and meta_suite != self.cfg.suite:
+            raise ValueError(f"{source}: recorded suite {meta_suite}, training suite {self.cfg.suite}")
+        meta_rotation = demo.metadata.get("rotation")
+        if meta_rotation is not None and bool(meta_rotation) != self.cfg.rotation:
+            raise ValueError(f"{source}: recorded rotation={meta_rotation}, training rotation={self.cfg.rotation}")
+
+        self.bottleneck_mode = "bottlenecks" in demo.metadata
+        self.bottlenecks = []
+        for i, section in enumerate(demo.bottlenecks):
+            start = int(section["start"])
+            end = int(section["end"])
+            start_state = section.get("start_state")
+            if not (0 <= start < end <= len(transitions)) or end - start < 2 or start_state is None:
+                raise ValueError(f"{source}: invalid bottleneck section {i}: [{start}, {end})")
+            self.bottlenecks.append(
+                Bottleneck(
+                    start=start,
+                    end=end,
+                    start_state=np.asarray(start_state, np.float64).reshape(-1),
+                    start_grip=float(section.get("start_grip", -1.0)),
+                )
+            )
+
+        self.full_dmp = self._make_dmp(transitions, 0, len(transitions), -1.0)
+        self.section_dmps = [
+            self._make_dmp(transitions, bottleneck.start, bottleneck.end, bottleneck.start_grip)
+            for bottleneck in self.bottlenecks
+        ]
+        self.train_selected = 0 if self.bottlenecks else None
+        self.eval_selected = None
+        if self.bottleneck_mode and not self.bottlenecks:
+            print("[bottleneck] no marked sections; the full task is the bottleneck window")
         print(
-            f"[dmp] fit base policy to first demo {source} "
-            f"({len(transitions)} transitions, {len(poses)} pose samples, "
-            f"pose_dim={policy.pose_dim}, gripper={policy.gripper}, "
-            f"weights/dim={self.cfg.dmp_weights_per_dim})"
+            f"[dmp] fit full-task DMP to {len(transitions)} demo steps and "
+            f"{len(self.bottlenecks)} section DMP(s) from {source}"
         )
-        return policy
 
-    def _base_action(self, obs: dict, grip: float) -> np.ndarray | None:
-        if self.base_policy is None:
-            return None
-        return self.base_policy.action(self._pose_with_grip(obs, grip))
+    def _window_at_step(self, step: int) -> int | None:
+        for idx, bottleneck in enumerate(self.bottlenecks):
+            if bottleneck.start <= step < bottleneck.end:
+                return idx
+        return None
 
-    def _append_base_action(self, obs: dict, base_action: np.ndarray) -> dict:
-        out = dict(obs)
-        state = np.asarray(out["state"], np.float32).reshape(-1)
-        out["state"] = np.concatenate([state, np.asarray(base_action, np.float32)])[None]
-        return out
+    def _base_action_for_step(
+        self,
+        obs: dict,
+        grip: float,
+        bottleneck_idx: int | None,
+        step_idx: int,
+    ) -> tuple[np.ndarray | None, bool]:
+        if self.full_dmp is None:
+            return None, True
+        pose = self._pose_with_grip(obs, grip)
+        if bottleneck_idx is not None:
+            return self.section_dmps[bottleneck_idx].action(pose), True
 
-    def _add_base_actions(self, transitions: list[dict]) -> list[dict]:
-        """Expand demo observations with DMP actions and convert actions to residuals."""
+        full_action = self.full_dmp.action(pose)
+        if not self.bottlenecks:
+            return full_action, True
+
+        window = self._window_at_step(step_idx)
+        if window is None:
+            self._active_section_idx = None
+            return full_action, False
+        if self._active_section_idx != window:
+            self.section_dmps[window].reset(pose)
+            self._active_section_idx = window
+        return self.section_dmps[window].action(pose), True
+
+    def _reset_episode(
+        self,
+        bottleneck_idx: int | None,
+        *,
+        train: bool,
+        trial_offset: int = 0,
+    ) -> tuple[object, float, np.ndarray | None, bool, dict]:
+        if bottleneck_idx is None:
+            init_state = None
+            grip = -1.0
+        else:
+            bottleneck = self.bottlenecks[bottleneck_idx]
+            init_state = bottleneck.start_state
+            grip = bottleneck.start_grip
+
+        state = self.env_worker.make_pool(
+            train=train,
+            task=self.cfg.task_id,
+            trial_offset=trial_offset,
+            n_active=1,
+            init_state_override=init_state,
+            reset_grip=grip,
+        )[0]
+        if self.full_dmp is not None:
+            pose = self._pose_with_grip(state.obs, grip)
+            if bottleneck_idx is not None:
+                self.section_dmps[bottleneck_idx].reset(pose)
+            else:
+                self.full_dmp.reset(pose)
+                self._active_section_idx = None
+        base_action, residual_active = self._base_action_for_step(state.obs, grip, bottleneck_idx, 0)
+        obs_enc = self.obs_adapter.encode(state.obs, base_action=base_action)
+        return state, grip, base_action, residual_active, obs_enc
+
+    def _append_base_action(self, obs: dict, base_action: np.ndarray | None) -> dict:
+        if base_action is None:
+            return obs
+        obs = {**obs}
+        state = np.asarray(obs["state"], np.float32)
+        base = np.asarray(base_action, np.float32).reshape(-1)
+        base = np.broadcast_to(base, (*state.shape[:-1], base.size))
+        obs["state"] = np.concatenate([state, base], axis=-1)
+        return obs
+
+    def _prepare_segment(
+        self,
+        transitions: list[dict],
+        policy: DmpPolicy,
+        start_grip: float,
+    ) -> list[dict]:
+        if not transitions:
+            return []
+        transitions = self._finalize_demo_actions(transitions, start_grip=start_grip)
         actions = [np.asarray(t["actions"], np.float32) for t in transitions]
         states = [np.asarray(t["observations"]["state"]) for t in transitions]
         states.append(np.asarray(transitions[-1]["next_observations"]["state"]))
-        poses = np.stack([self._pose_from_state(s) for s in states])
+        poses = np.stack([self._pose_from_state(state) for state in states])
         if self.cfg.dmp_gripper:
-            grip_states = np.concatenate([[-1.0], [float(a[-1]) for a in actions]])
-            poses = np.concatenate([poses, grip_states[:, None]], axis=1)
-        self.base_policy.reset(poses[0])
-        base_actions = np.stack([self.base_policy.action(pose) for pose in poses])
+            grips = np.concatenate([[float(start_grip)], [float(action[-1]) for action in actions]])
+            poses = np.column_stack([poses, grips])
+        policy.reset(poses[0])
+        base_actions = np.stack([policy.action(pose) for pose in poses])
 
-        out = []
+        prepared = []
         for i, transition in enumerate(transitions):
-            action = np.asarray(transition["actions"], np.float32).copy()
-            residual = residual_from_final(
-                action,
-                base_actions[i],
-                residual_scale=self.cfg.residual_blend_scale,
-                min_base_weight=self.cfg.residual_min_base_weight,
-            )
-            out.append(
+            action = np.asarray(transition["actions"], np.float32)
+            prepared.append(
                 {
                     **transition,
                     "observations": self._append_base_action(transition["observations"], base_actions[i]),
                     "next_observations": self._append_base_action(transition["next_observations"], base_actions[i + 1]),
-                    "actions": residual,
+                    "actions": residual_target(action, base_actions[i]),
                 }
             )
+        return self._mark_terminal_success(prepared)
+
+    def _prepare_demo(self, transitions: list[dict]) -> list[dict]:
+        return self._finalize_demo_actions(transitions)
+
+    def _mark_terminal_success(self, transitions: list[dict]) -> list[dict]:
+        if transitions:
+            transitions[-1] = {
+                **transitions[-1],
+                "rewards": np.float32(1.0),
+                "masks": np.float32(0.0),
+                "dones": True,
+            }
+        return transitions
+
+    def _finalize_demo_actions(self, transitions: list[dict], start_grip: float = -1.0) -> list[dict]:
+        if self.cfg.algorithm != "hgdagger":
+            return transitions
+        out, state = [], float(start_grip)
+        for transition in transitions:
+            action = np.array(transition["actions"], np.float32)
+            if action[-1] != 0.0:
+                state = float(np.sign(action[-1]))
+            action[-1] = state
+            out.append({**transition, "actions": action})
+            if transition["dones"]:
+                state = -1.0
         return out
 
     # -- demos -------------------------------------------------------------
@@ -1054,91 +1234,229 @@ class HilLiberoTrainer:
                 raise FileNotFoundError(f"--demo-path {path} does not exist")
         return files
 
-    def _prepare_demo(self, transitions: list[dict], source: str) -> list[dict]:
-        if not transitions:
-            return []
-        dim = int(np.asarray(transitions[0]["actions"]).shape[-1])
-        if dim != self.cfg.action_dim:
-            raise ValueError(
-                f"{source}: demo actions are {dim}-dim but this run uses {self.cfg.action_dim} "
-                f"(--rotation={self.cfg.rotation}). Record and train with the same --rotation."
-            )
-        expected_state_dim = self.obs_adapter.proprio_dim - self.obs_adapter.base_action_dim
-        demo_state_dim = int(np.asarray(transitions[0]["observations"]["state"]).shape[-1])
-        if demo_state_dim != expected_state_dim:
-            raise ValueError(
-                f"{source}: demo states are {demo_state_dim}-dim but this run uses "
-                f"{expected_state_dim} (--include-velocity={self.cfg.include_velocity}). "
-                "Record and train with the same --include-velocity."
-            )
-
-        # With a base policy the stored action is the residual the RL agent
-        # must learn: residual = demonstrated_action - dmp_action.
-        if self.base_policy is not None:
-            transitions = self._add_base_actions(transitions)
-
-        if self.cfg.algorithm != "hgdagger":
-            return transitions
-        out, state = [], -1.0  # LIBERO resets with the gripper open
-        for transition in transitions:
-            action = np.array(transition["actions"], np.float32)
-            if action[-1] != 0.0:
-                state = float(np.sign(action[-1]))
-            action[-1] = state
-            out.append({**transition, "actions": action})
-            if transition["dones"]:
-                state = -1.0
-        return out
-
     def _load_demos(self) -> None:
         files = self._demo_files()
         total = 0
+        segments = 0
         for path in files:
-            with path.open("rb") as f:
-                transitions = self._prepare_demo(pkl.load(f), str(path))
-            if not transitions:
+            demo = load_demo(path)
+            if not demo.transitions:
                 continue
-            self.demo.force_episode_start()
-            for transition in transitions:
-                self.demo.insert(transition)
-            total += len(transitions)
+            self._validate_demo_dims(demo.transitions, str(path))
+
+            prepared_segments: list[list[dict]] = []
+            if self.cfg.base_policy == "dmp":
+                if self.bottleneck_mode and self.bottlenecks:
+                    if len(demo.bottlenecks) < len(self.bottlenecks):
+                        print(f"[demo] {path}: expected {len(self.bottlenecks)} sections; skipping")
+                        continue
+                    for i, bottleneck in enumerate(self.bottlenecks):
+                        section = demo.bottlenecks[i]
+                        start = int(section["start"])
+                        end = int(section["end"])
+                        if not (0 <= start < end <= len(demo.transitions)) or end - start < 2:
+                            raise ValueError(f"{path}: invalid bottleneck section {i}: [{start}, {end})")
+                        start_grip = float(section.get("start_grip", bottleneck.start_grip))
+                        prepared_segments.append(
+                            self._prepare_segment(demo.transitions[start:end], self.section_dmps[i], start_grip)
+                        )
+                else:
+                    prepared_segments.append(self._prepare_segment(demo.transitions, self.full_dmp, -1.0))
+            else:
+                prepared_segments.append(self._prepare_demo(demo.transitions))
+
+            for prepared in prepared_segments:
+                if not prepared:
+                    continue
+                self.demo.force_episode_start()
+                for transition in prepared:
+                    self.demo.insert(transition)
+                total += len(prepared)
+                segments += 1
+
             key = str(path)
             if key not in self._demo_files_seen:
                 self._demo_files_seen.add(key)
                 self._demo_episodes += 1
+
         if files:
-            print(f"[demo] loaded {total} transitions from {len(files)} file(s); demo buffer size = {len(self.demo)}")
+            print(
+                f"[demo] loaded {total} transitions ({segments} segment(s)) "
+                f"from {len(files)} file(s); demo buffer size = {len(self.demo)}"
+            )
         self._save_stats()
 
+    # -- teleop ------------------------------------------------------------
+
     def record_demos(self) -> None:
-        """Pure teleop: save successful episodes, one pickle each."""
-        if self._stream is None:
-            raise RuntimeError("--record-demos needs the browser gamepad page (the stream failed to start)")
-        out = self.cfg.demo_output_dir
-        saved = attempts = 0
-        print(
-            f"[teleop] task {self.cfg.task_id}: {self.task_name}\n"
-            f"[teleop] recording {self.cfg.record_demos} successful demos -> {out}\n"
-            "[teleop] OPTIONS starts an attempt; the env ends it on success (or OPTIONS marks success); "
-            "SHARE or a timeout discards it."
-        )
-        while saved < self.cfg.record_demos:
-            self._hud = f"TELEOP {saved}/{self.cfg.record_demos}"
-            episode, success = self._run_episode(teleop_only=True)
+        cfg = self.cfg
+        out = cfg.demo_output_dir
+        out.mkdir(parents=True, exist_ok=True)
+        saved = 0
+        attempts = 0
+        while saved < cfg.record_demos and self._env_steps < cfg.max_env_steps:
             attempts += 1
-            first = next((i for i, step in enumerate(episode) if step["intervened"]), None)
-            if not success or first is None:
-                print(f"[teleop] discarded attempt {attempts} (success={success}, steps={len(episode)})")
+            self._teleop_base_hud = f"TELEOP demo {saved + 1}/{cfg.record_demos}"
+            episode, success, sections = self._record_episode()
+            if not success:
+                print(f"[teleop] attempt {attempts}: not successful; discard")
                 continue
+            first_intervened = next((i for i, step in enumerate(episode) if step["intervened"]), None)
+            if first_intervened is None:
+                print(f"[teleop] attempt {attempts}: no intervention; discard")
+                continue
+            first = 0 if cfg.bottleneck_label else first_intervened
             transitions = self._make_transitions(episode[first:], success=True)
-            path = save_transitions(out, transitions)
+            adjusted = [
+                {
+                    "start": section["start"] - first,
+                    "end": section["end"] - first,
+                    "start_state": section["start_state"],
+                    "end_state": section["end_state"],
+                    "start_grip": section["start_grip"],
+                }
+                for section in sections
+            ]
+            if cfg.bottleneck_label:
+                path = save_demo(
+                    out,
+                    transitions,
+                    bottlenecks=adjusted,
+                    metadata={
+                        "task_id": int(cfg.task_id),
+                        "suite": cfg.suite,
+                        "rotation": bool(cfg.rotation),
+                    },
+                )
+            else:
+                path = save_transitions(out, transitions)
             saved += 1
-            print(f"[teleop] saved demo {saved}/{self.cfg.record_demos}: {len(transitions)} steps -> {path}")
+            print(
+                f"[teleop] saved demo {saved}/{cfg.record_demos}: "
+                f"{len(transitions)} steps, {len(adjusted)} bottleneck section(s) -> {path}"
+            )
         print(f"[teleop] done: {saved} demos in {out}. Train with: --demo-path {out}")
+
+    def _record_episode(self) -> tuple[list[dict], bool, list[dict]]:
+        cfg = self.cfg
+        state = self.env_worker.make_pool(train=True, task=cfg.task_id, n_active=1)[0]
+        grip = -1.0
+        obs_enc = self.obs_adapter.encode(state.obs)
+        episode: list[dict] = []
+        sections: list[dict] = []
+        open_section = None
+        self._recording_sections = sections
+        self._recording_open = None
+        self.operator.reset()
+        self._mode = "TELEOP"
+        self._show(state.obs, "IDLE: press OPTIONS", _WHITE)
+        if not (cfg.auto_start or self._stream is None):
+            print("[teleop] press OPTIONS to start")
+            while True:
+                event = self.operator.poll()
+                if event.options:
+                    break
+                time.sleep(0.02)
+
+        success = False
+        while self._env_steps < cfg.max_env_steps:
+            event = self.operator.poll()
+            if event.options:
+                success = True
+                break
+            if event.share:
+                success = False
+                break
+            if cfg.bottleneck_label:
+                if event.bottleneck_start and open_section is None:
+                    open_section = {
+                        "start": len(episode),
+                        "start_state": np.asarray(state.env.get_state(), np.float64),
+                        "start_grip": float(grip),
+                    }
+                    self._recording_open = open_section
+                    print(f"[teleop] bottleneck B{len(sections) + 1} started at step {len(episode)}")
+                if event.bottleneck_end and open_section is not None:
+                    end = len(episode)
+                    if end - open_section["start"] >= 2:
+                        open_section["end"] = end
+                        open_section["end_state"] = np.asarray(state.env.get_state(), np.float64)
+                        sections.append(open_section)
+                        print(f"[teleop] bottleneck B{len(sections)} ended at step {end}")
+                    else:
+                        print("[teleop] bottleneck too short; ignored")
+                    open_section = None
+                    self._recording_open = None
+
+            active, moving, command = self.operator.takeover()
+            final_action = command if cfg.rotation else command[[0, 1, 2, 6]]
+            final_action = np.asarray(final_action, np.float32)
+            final_action[-1] = _discretize_gripper(float(final_action[-1]))
+            gripper = float(final_action[-1])
+            penalty = cfg.grasp_penalty if gripper not in (0.0, grip) else 0.0
+            if gripper != 0.0:
+                grip = gripper
+
+            state.env.send_step(self._env_action(final_action, grip))
+            obs, done, info = state.env.recv_step()
+            state.obs = obs
+            state.steps += 1
+            self._env_steps += 1
+            reward = info.get("reward") if info else None
+            success = bool(done and (reward is None or reward > 0))
+            if success:
+                state.success = True
+                state.done = True
+            elif done or state.steps >= cfg.max_episode_steps:
+                state.done = True
+
+            next_enc = self.obs_adapter.encode(obs)
+            episode.append(
+                {
+                    "observations": obs_enc,
+                    "actions": final_action,
+                    "next_observations": next_enc,
+                    "intervened": moving,
+                    "grasp_penalty": penalty,
+                }
+            )
+            obs_enc = next_enc
+            self._show(state.obs, self._teleop_base_hud, _ORANGE if active else _GREEN)
+            if state.done:
+                break
+            time.sleep(1.0 / max(cfg.control_hz, 1e-6))
+
+        if cfg.bottleneck_label and open_section is not None:
+            end = len(episode)
+            if end - open_section["start"] >= 2:
+                open_section["end"] = end
+                open_section["end_state"] = np.asarray(state.env.get_state(), np.float64)
+                sections.append(open_section)
+            self._recording_open = None
+        return episode, success, sections
+
+    def _make_transitions(self, steps: list[dict], *, success: bool) -> list[dict]:
+        out = []
+        for i, step in enumerate(steps):
+            last = i == len(steps) - 1
+            out.append(
+                make_transition(
+                    step["observations"],
+                    step["actions"],
+                    step["next_observations"],
+                    reward=1.0 if success and last else 0.0,
+                    done=last,
+                    intervened=step["intervened"],
+                    grasp_penalty=step["grasp_penalty"],
+                )
+            )
+        return out
 
     # -- episode loop ------------------------------------------------------
 
     def run(self) -> None:
+        self._training_seconds = self._elapsed_seconds()
+        self._session_start = time.monotonic()
         try:
             if self.teleop_only:
                 self.record_demos()
@@ -1149,10 +1467,10 @@ class HilLiberoTrainer:
                 return
             self._start_learner()
             while self._episodes < self.cfg.max_episodes and self._env_steps < self.cfg.max_env_steps:
-                episode, success = self._run_episode()
+                result = self._train_episode()
                 self._episodes += 1
                 self._collected_episodes += 1
-                self._flush(episode, success=success)
+                self._flush(result.transitions, success=result.success)
                 if self._should_eval():
                     result = self.evaluate(
                         self.cfg.eval_episodes,
@@ -1172,6 +1490,253 @@ class HilLiberoTrainer:
             )
         finally:
             self.close()
+
+    def _train_episode(self) -> EpisodeResult:
+        idx = self.train_selected if self.bottlenecks else None
+        print(f"[train] episode {self._episodes + 1}: {self._selection_label(idx)}")
+        return self._run_episode(idx, train=True)
+
+    def _eval_episode(self, trial_offset: int) -> EpisodeResult:
+        idx = self.eval_selected if self.bottleneck_mode else None
+        return self._run_episode(idx, train=False, trial_offset=trial_offset)
+
+    def _run_episode(
+        self,
+        bottleneck_idx: int | None,
+        *,
+        train: bool,
+        trial_offset: int = 0,
+    ) -> EpisodeResult:
+        cfg = self.cfg
+        bottleneck = self.bottlenecks[bottleneck_idx] if bottleneck_idx is not None else None
+        self._episode_is_train = train
+        if train:
+            self._episode_train_idx = bottleneck_idx
+        else:
+            self._episode_eval_idx = bottleneck_idx
+
+        state, grip, base_action, residual_active, obs_enc = self._reset_episode(
+            bottleneck_idx,
+            train=train,
+            trial_offset=trial_offset,
+        )
+        transitions: list[dict] = []
+        frames = [] if train else [self.obs_adapter.display(state.obs)]
+        self.operator.reset()
+        self._mode = "TRAIN" if train else "EVAL"
+        label = f"{self._selection_label(bottleneck_idx)} | OPTIONS"
+        self._show(state.obs, f"IDLE: {label}" if self._stream is not None else label, _WHITE)
+
+        skipped = False
+        if not (cfg.auto_start or self._stream is None):
+            print("[episode] press OPTIONS to start")
+            while True:
+                event = self.operator.poll()
+                if event.options:
+                    break
+                if not train and event.skip:
+                    skipped = True
+                    break
+                self._handle_selection(event, training=train)
+                self._check_learner()
+                time.sleep(0.02)
+            if skipped:
+                return EpisodeResult(transitions=[], success=False, frames=frames, skipped=True)
+
+        manual_mode = self.bottleneck_mode and (train or bottleneck is not None)
+        manual_success = False
+        manual_failure = False
+        marking = False
+        marking_start = 0.0
+        mark_timeout_s = max(10.0, cfg.max_episode_steps / max(cfg.control_hz, 1e-6))
+        max_steps = bottleneck.n_steps if bottleneck is not None else cfg.max_episode_steps
+        step_idx = 0
+        success = False
+
+        while self._env_steps < cfg.max_env_steps:
+            self._check_learner()
+            event = self.operator.poll()
+            if not train and event.skip:
+                skipped = True
+                break
+            if event.options:
+                manual_success = True
+                break
+            if event.share:
+                manual_failure = True
+                break
+            self._handle_selection(event, training=train)
+
+            if marking:
+                if time.monotonic() - marking_start > mark_timeout_s:
+                    print("[episode] marking timeout -> failure")
+                    break
+                time.sleep(0.02)
+                continue
+
+            if step_idx >= max_steps:
+                if manual_mode:
+                    marking = True
+                    marking_start = time.monotonic()
+                    print("[episode] bottleneck finished; OPTIONS=success SHARE=failure")
+                    self._show(state.obs, "BOTTLENECK DONE: OPTIONS=success, SHARE=failure", _WHITE)
+                    continue
+                break
+
+            step_start = time.monotonic()
+            if train:
+                active, moving, command = self.operator.takeover()
+            else:
+                active, moving, command = False, False, None
+
+            if active:
+                final_action = command if cfg.rotation else command[[0, 1, 2, 6]]
+                final_action = np.asarray(final_action, np.float32)
+                intervened = moving
+            elif not residual_active:
+                final_action = np.asarray(base_action, np.float32)
+                intervened = False
+            else:
+                agent = self.actor_agent if train else self.agent
+                residual = np.array(agent.sample_actions(obs_enc, seed=self._next_key(), argmax=not train), np.float32)
+                final_action = (
+                    residual
+                    if base_action is None
+                    else combine_base_residual(base_action, residual, max_residual=cfg.residual_max)
+                )
+                intervened = False
+
+            final_action = np.asarray(final_action, np.float32)
+            final_action[-1] = _discretize_gripper(float(final_action[-1]))
+            gripper = float(final_action[-1])
+            penalty = cfg.grasp_penalty if gripper not in (0.0, grip) else 0.0
+            if gripper != 0.0:
+                grip = gripper
+            if cfg.algorithm == "hgdagger" and (active or residual_active):
+                final_action[-1] = grip
+            residual_action = final_action.copy() if base_action is None else residual_target(final_action, base_action)
+
+            state.env.send_step(self._env_action(final_action, grip))
+            obs, done, info = state.env.recv_step()
+            state.obs = obs
+            state.steps += 1
+            self._env_steps += 1
+            reward = info.get("reward") if info else None
+            success = bool(done and (reward is None or reward > 0))
+            if success:
+                state.success = True
+                state.done = True
+            elif done or state.steps >= cfg.max_episode_steps:
+                state.done = True
+
+            next_base_action, next_residual_active = self._base_action_for_step(
+                obs,
+                grip,
+                bottleneck_idx,
+                step_idx + 1,
+            )
+            next_enc = self.obs_adapter.encode(obs, base_action=next_base_action)
+            if train and residual_active:
+                transitions.append(
+                    {
+                        "observations": obs_enc,
+                        "actions": residual_action,
+                        "next_observations": next_enc,
+                        "intervened": intervened,
+                        "grasp_penalty": penalty,
+                    }
+                )
+            obs_enc, base_action, residual_active = next_enc, next_base_action, next_residual_active
+            step_idx += 1
+
+            self._mode = "HUMAN" if active else ("TRAIN" if train else "EVAL")
+            self._show(state.obs, self._label(active=active), _ORANGE if active else _GREEN)
+            if not train:
+                frames.append(self.obs_adapter.display(obs))
+
+            if state.done:
+                if manual_mode:
+                    marking = True
+                    marking_start = time.monotonic()
+                    print("[episode] env ended; OPTIONS=success SHARE=failure")
+                    self._show(state.obs, "BOTTLENECK DONE: OPTIONS=success, SHARE=failure", _WHITE)
+                else:
+                    break
+            sleep_s = 1.0 / max(cfg.control_hz, 1e-6) - (time.monotonic() - step_start)
+            if sleep_s > 0.0:
+                time.sleep(sleep_s)
+
+        if manual_failure:
+            success = False
+        elif manual_success:
+            success = True
+        elif manual_mode:
+            success = False
+        else:
+            success = state.success
+
+        return EpisodeResult(
+            self._make_transitions(transitions, success=success),
+            bool(success),
+            frames,
+            skipped,
+        )
+
+    def _flush(self, transitions: list[dict], *, success: bool) -> None:
+        if not transitions:
+            return
+        if self.online is not None:
+            for transition in transitions:
+                self.online.insert(transition)
+            self._online_episodes += 1
+
+        if self.bottleneck_mode:
+            demo_segments = [transitions]
+        else:
+            demo_segments = []
+            segment: list[dict] = []
+            for transition in transitions:
+                if transition["intervened"]:
+                    segment.append(transition)
+                elif segment:
+                    demo_segments.append(segment)
+                    segment = []
+            if segment:
+                demo_segments.append(segment)
+
+        demo_steps = 0
+        for segment in demo_segments:
+            self.demo.force_episode_start()
+            for transition in segment:
+                self.demo.insert(transition)
+            demo_steps += len(segment)
+        if demo_steps:
+            self._demo_episodes += 1
+        self._save_stats()
+        print(
+            f"[flush] online={len(transitions)} demo={demo_steps} "
+            f"success={success} online_episodes={self._online_episodes} "
+            f"demo_episodes={self._demo_episodes}"
+        )
+
+    def _handle_selection(self, event: PadEvent, *, training: bool) -> bool:
+        if not self.bottleneck_mode or not (event.prev_bottleneck or event.next_bottleneck):
+            return False
+        if not self.bottlenecks:
+            return False
+        delta = -1 if event.prev_bottleneck else 1
+        if training:
+            n = len(self.bottlenecks)
+            current = self.train_selected if self.train_selected is not None else 0
+            self.train_selected = (current + delta) % n
+            print(f"[bottleneck] training {self._selection_label(self.train_selected)}")
+        else:
+            options = [None, *range(len(self.bottlenecks))]
+            current = self.eval_selected
+            pos = (options.index(current) + delta) % len(options)
+            self.eval_selected = options[pos]
+            print(f"[bottleneck] eval {self._selection_label(self.eval_selected)}")
+        return True
 
     def _should_eval(self) -> bool:
         return (
@@ -1195,12 +1760,6 @@ class HilLiberoTrainer:
             )
 
     def _env_action(self, action: np.ndarray, grip: float) -> np.ndarray:
-        """Agent action -> the 7-dim LIBERO action.
-
-        The env receives the persistent commanded gripper state (+-1), not the
-        agent's {-1, 0, +1} event. A held command lets a tap complete a full
-        open/close, like the real Franka gripper.
-        """
         action = np.asarray(action, np.float32)
         if action.shape[-1] == 4:
             action = np.array([action[0], action[1], action[2], 0.0, 0.0, 0.0, action[3]], np.float32)
@@ -1210,198 +1769,19 @@ class HilLiberoTrainer:
 
     def _label(self, *, active: bool) -> str:
         mode = "HUMAN" if active else "POLICY"
-        return f"O{self._online_episodes} D{self._demo_episodes} E{self._collected_episodes} {self._elapsed()} | {mode} L{self._grad_step}"
-
-    def _run_episode(self, *, teleop_only: bool = False) -> tuple[list[dict], bool]:
-        cfg = self.cfg
-        state = self.env_worker.make_pool(train=True, task=cfg.task_id, n_active=1)[0]
-        episode: list[dict] = []
-        grip = -1.0  # commanded gripper state (LIBERO resets open)
-        manual_success = manual_failure = False
-
-        self.operator.reset()
-        self._mode = "IDLE"
-        self._show(state.obs, "IDLE: press OPTIONS", _WHITE)
-
-        # Start the DMP from the actual episode pose and encode its first base
-        # action into the observation the agent sees.
-        base_action = None
-        if self.base_policy is not None:
-            self.base_policy.reset(self._pose_with_grip(state.obs, grip))
-            base_action = self._base_action(state.obs, grip)
-        obs_enc = self.obs_adapter.encode(state.obs, base_action=base_action)
-
-        print(f"\n[episode] task {cfg.task_id}: {self.task_name}")
-        if not (cfg.auto_start or self._stream is None):
-            print("[episode] Press OPTIONS to start.")
-            while not self.operator.poll().options:
-                self._check_learner()
-                time.sleep(0.02)
-            print("[episode] recording: OPTIONS = success, SHARE = failure")
-        if not teleop_only and self._session_start is None:
-            self._session_start = time.monotonic()
-
-        while True:
-            self._check_learner()
-            event = self.operator.poll()
-            if event.options:
-                manual_success = True
-                break
-            if event.share:
-                manual_failure = True
-                break
-            # if self._env_steps % 50 == 0:
-            #     print("COINSDFOIN")
-            #     print(self._env_steps)
-
-            if self._env_steps >= cfg.max_env_steps:
-                break
-
-            step_start = time.monotonic()
-            active, moving, cmd = self.operator.takeover()
-            if teleop_only:
-                active = True
-
-            if active:
-                final_action = cmd if cfg.rotation else cmd[[0, 1, 2, 6]]
-                intervened = moving  # idle hold frames are not demos
-            else:
-                residual = np.array(
-                    self.actor_agent.sample_actions(obs_enc, seed=self._next_key(), argmax=False),
-                    np.float32,
-                )
-                final_action = (
-                    residual
-                    if base_action is None
-                    else combine_base_residual(
-                        base_action,
-                        residual,
-                        residual_scale=cfg.residual_blend_scale,
-                        min_base_weight=cfg.residual_min_base_weight,
-                    )
-                )
-                intervened = False
-
-            final_action = np.asarray(final_action, np.float32)
-            final_action[-1] = _discretize_gripper(float(final_action[-1]))
-            g = float(final_action[-1])
-            penalty = cfg.grasp_penalty if g not in (0.0, grip) else 0.0
-            if g != 0.0:
-                grip = g
-            if cfg.algorithm == "hgdagger" and not teleop_only:
-                final_action[-1] = grip  # BC regresses a persistent open/closed label
-
-            # The buffer stores the residual the RL agent must learn. With a
-            # base policy the executed action is the weighted base+residual
-            # composition; invert it so the stored residual reproduces the
-            # demonstrated/executed action under the same weighting.
-            if base_action is not None:
-                residual_action = residual_from_final(
-                    final_action,
-                    base_action,
-                    residual_scale=cfg.residual_blend_scale,
-                    min_base_weight=cfg.residual_min_base_weight,
-                )
-            else:
-                residual_action = final_action.copy()
-
-            state.env.send_step(self._env_action(final_action, grip))
-            obs, done, info = state.env.recv_step()
-            state.obs = obs
-            state.steps += 1
-            reward = info.get("reward") if info else None
-            success = bool(done and (reward is None or reward > 0))
-            if success:
-                state.success = True
-                state.done = True
-            elif done or state.steps >= cfg.max_episode_steps:
-                state.done = True
-
-            next_base_action = self._base_action(obs, grip) if self.base_policy is not None else None
-            next_enc = self.obs_adapter.encode(obs, base_action=next_base_action)
-            episode.append(
-                {
-                    "observations": obs_enc,
-                    "actions": residual_action,
-                    "next_observations": next_enc,
-                    "intervened": intervened,
-                    "grasp_penalty": penalty,
-                }
-            )
-            obs_enc, base_action = next_enc, next_base_action
-            self._env_steps += 1
-            self._mode = "HUMAN" if active else "POLICY"
-            self._show(state.obs, self._hud or self._label(active=active), _ORANGE if active else _GREEN)
-            if state.done:
-                break
-            time.sleep(max(0.0, 1.0 / max(cfg.control_hz, 1e-6) - (time.monotonic() - step_start)))
-
-        if manual_failure:
-            success = False
-        elif manual_success:
-            success = True
-        else:
-            success = state.success
-        return episode, bool(success)
-
-    # -- buffering ---------------------------------------------------------
-
-    def _make_transitions(self, episode: list[dict], *, success: bool) -> list[dict]:
-        transitions = []
-        for i, step in enumerate(episode):
-            last = i == len(episode) - 1
-            transitions.append(
-                make_transition(
-                    step["observations"],
-                    step["actions"],
-                    step["next_observations"],
-                    reward=1.0 if (success and last) else 0.0,
-                    done=last,
-                    intervened=step["intervened"],
-                    grasp_penalty=step["grasp_penalty"],
-                )
-            )
-        return transitions
-
-    def _flush(self, episode: list[dict], *, success: bool) -> None:
-        if not episode:
-            return
-        transitions = self._make_transitions(episode, success=success)
-        if self.online is not None:
-            for transition in transitions:
-                self.online.insert(transition)
-            self._online_episodes += 1
-
-        # Demo pickles/segments are non-contiguous: force a fresh stacked-observation
-        # window at the start of every intervention run.
-        in_segment = False
-        interventions = 0
-        for transition in transitions:
-            if not transition["intervened"]:
-                in_segment = False
-                continue
-            if not in_segment:
-                self.demo.force_episode_start()
-                in_segment = True
-            self.demo.insert(transition)
-            interventions += 1
-        if interventions:
-            self._demo_episodes += 1
-        self._save_stats()
-
-        print(
-            f"[episode {self._episodes}] success={success} steps={len(transitions)} "
-            f"interventions={interventions} online={len(self.online) if self.online is not None else 0} "
-            f"demo={len(self.demo)} | online_eps={self._online_episodes} demo_eps={self._demo_episodes} "
-            f"collected={self._collected_episodes} training={self._elapsed()} learner_step={self._grad_step}"
+        bottleneck = ""
+        if self.bottleneck_mode:
+            idx = self._episode_train_idx if self._episode_is_train else self._episode_eval_idx
+            selected = self.train_selected if self._episode_is_train else self.eval_selected
+            bottleneck = f" | {self._selection_label(idx)}"
+            if selected != idx:
+                bottleneck += f" (next {self._selection_label(selected)})"
+        return (
+            f"O{self._online_episodes} D{self._demo_episodes} E{self._collected_episodes} "
+            f"{mode} | {bottleneck}"
         )
-        if self.cfg.algorithm == "hgdagger" and interventions == 0 and len(self.demo) == 0:
-            now = time.monotonic()
-            if now - self._last_hint > 5.0:
-                print("[hgdagger] no interventions yet - move a stick during rollout to create BC data.")
-                self._last_hint = now
 
-    # -- learner thread ----------------------------------------------------
+    # -- learner -----------------------------------------------------------
 
     def _start_learner(self) -> None:
         self._learner_thread = threading.Thread(target=self._learner_loop, name="learner", daemon=True)
@@ -1480,98 +1860,47 @@ class HilLiberoTrainer:
     # -- eval --------------------------------------------------------------
 
     def evaluate(self, n_episodes: int, *, iteration: int, tag: str) -> dict:
-        agent = self.agent
+        n_attempts = max(1, int(n_episodes))
         successes: list[bool] = []
         skipped = 0
-        n_attempts = max(1, int(n_episodes))
         self._mode = "EVAL"
+        self._episode_is_train = False
         print(
-            f"[eval {tag}] task {self.cfg.task_id}: {self.task_name} | {n_attempts} episodes "
-            "(D-pad left/right or L1/R1 skips the current episode)"
+            f"[eval {tag}] task {self.cfg.task_id}: {self.task_name} | "
+            f"{n_attempts} episodes | {self._selection_label(self.eval_selected)}"
         )
         for i in range(n_attempts):
-            state = self.env_worker.make_pool(train=False, task=self.cfg.task_id, n_active=1, trial_offset=i)[0]
-
-            # Clear stale pad events and re-anchor the DMP for this episode.
-            self.operator.reset()
-            grip = -1.0
-            base_action = None
-            if self.base_policy is not None:
-                self.base_policy.reset(self._pose_with_grip(state.obs, grip))
-                base_action = self._base_action(state.obs, grip)
-            obs_enc = self.obs_adapter.encode(state.obs, base_action=base_action)
-            frames = [self.obs_adapter.display(state.obs)]
-            skipped_this = False
-
-            while not state.done:
-                self._check_learner()
-                event = self.operator.poll()
-                if event.skip:
-                    skipped_this = True
-                    break
-
-                residual = np.array(agent.sample_actions(obs_enc, seed=self._next_key(), argmax=True), np.float32)
-                action = (
-                    residual
-                    if base_action is None
-                    else combine_base_residual(
-                        base_action,
-                        residual,
-                        residual_scale=self.cfg.residual_blend_scale,
-                        min_base_weight=self.cfg.residual_min_base_weight,
-                    )
-                )
-                g = _discretize_gripper(float(action[-1]))
-                if g != 0.0:
-                    grip = g
-                action[-1] = grip if self.cfg.algorithm == "hgdagger" else g
-                state.env.send_step(self._env_action(action, grip))
-                obs, done, info = state.env.recv_step()
-                state.obs = obs
-                state.steps += 1
-                reward = info.get("reward") if info else None
-                success = bool(done and (reward is None or reward > 0))
-                if success:
-                    state.success = True
-                    state.done = True
-                elif done or state.steps >= self.cfg.max_episode_steps:
-                    state.done = True
-
-                next_base_action = self._base_action(obs, grip) if self.base_policy is not None else None
-                obs_enc = self.obs_adapter.encode(obs, base_action=next_base_action)
-                base_action = next_base_action
-                frames.append(self.obs_adapter.display(obs))
-                self._show(state.obs, f"EVAL L{self._grad_step} | {self.task_name}", _WHITE)
-
-            if skipped_this:
+            result = self._eval_episode(trial_offset=i)
+            self._save_video(result.frames, tag=f"{tag}_s{i}", success=result.success, skipped=result.skipped)
+            if result.skipped:
                 skipped += 1
-                self._show(state.obs, f"EVAL SKIPPED L{self._grad_step}", _ORANGE)
-                print(f"[eval {tag}] episode {i + 1}/{n_attempts} skipped by operator")
-                self._save_video(frames, tag=f"{tag}_s{i}", success=False, skipped=True)
+                print(f"[eval {tag}] episode {i + 1}/{n_attempts}: skipped")
             else:
-                successes.append(bool(state.success))
-                self._save_video(frames, tag=f"{tag}_s{i}", success=bool(state.success))
+                successes.append(result.success)
+                print(f"[eval {tag}] episode {i + 1}/{n_attempts}: success={result.success}")
 
-        rate = float(np.mean(successes)) if successes else 0.0
+        success_rate = float(np.mean(successes)) if successes else 0.0
+        n_success = int(sum(successes))
         result = {
             "tag": tag,
-            "iteration": iteration,
-            "success_rate": rate,
-            "n": len(successes),
+            "iteration": int(iteration),
+            "episodes": n_attempts,
+            "scored": len(successes),
+            "successes": n_success,
+            "success_rate": success_rate,
             "skipped": skipped,
-            "attempted": n_attempts,
-            "online_episodes": self._online_episodes,
-            "demo_episodes": self._demo_episodes,
-            "collected_episodes": self._collected_episodes,
-            "training_seconds": round(self._elapsed_seconds(), 1),
+            "bottleneck": self._selection_label(self.eval_selected) if self.bottleneck_mode else None,
         }
-        print(f"[eval {tag}] success={rate:.2f} n={len(successes)} skipped={skipped}")
+        print(
+            f"[eval {tag}] success_rate={success_rate:.2f} "
+            f"({n_success}/{len(successes)}) skipped={skipped}"
+        )
         with self._eval_log.open("a") as f:
             f.write(json.dumps(result) + "\n")
         self._mode = "IDLE"
         return result
 
-    # -- plumbing ----------------------------------------------------------
+    # -- display -----------------------------------------------------------
 
     def _next_key(self):
         self._rng, key = jax.random.split(self._rng)

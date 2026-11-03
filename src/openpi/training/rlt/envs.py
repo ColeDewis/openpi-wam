@@ -90,16 +90,18 @@ LIBERO_DUMMY_ACTION = np.array([0.0] * 6 + [-1.0], dtype=np.float32)
 RESET_SETTLE_STEPS = 15
 
 
-def _perturb_objects_xy(env, rng: np.random.Generator, xy_m: float, *, all_objects: bool) -> list[str]:
+def _perturb_objects_xy(
+    env,
+    rng: np.random.Generator,
+    xy_m: float,
+    *,
+    all_objects: bool,
+    grasped: set[str] = frozenset(),
+) -> list[str]:
     """Move movable objects by a uniform +-xy_m in x/y, preserving z.
 
-    LIBERO's init states are full MuJoCo states, so we can edit the free-joint
-    qpos directly.  z and the quaternion are left untouched: changing z would
-    let objects clip through the table.  Primary ``obj_of_interest`` objects
-    (the bowl in task 1) are always candidates.  With ``all_objects``, every
-    movable object is perturbed except non-primary objects whose BDDL init
-    relation is ``In`` a container (drawer/cabinet), where an xy shift would
-    push them into the walls.
+    Objects currently held by the gripper are skipped; they move with the EEF
+    perturbation instead so the grasp stays intact.
     """
     base = env.env
     objects = getattr(base, "objects_dict", {}) or {}
@@ -121,7 +123,7 @@ def _perturb_objects_xy(env, rng: np.random.Generator, xy_m: float, *, all_objec
     for name in names:
         obj = objects.get(name)
         joints = getattr(obj, "joints", None)
-        if not joints:
+        if not joints or name in grasped:
             continue
         joint = joints[-1]
         addr = sim.model.get_joint_qpos_addr(joint)
@@ -190,6 +192,39 @@ def _perturb_eef_xyz(env, rng: np.random.Generator, xyz_m: float) -> np.ndarray:
     return np.array(sim.data.site_xpos[site_id], dtype=np.float64, copy=True) - start
 
 
+def _grasped_object_names(env) -> set[str]:
+    """Names of objects currently held by the robot gripper."""
+    base = env.env
+    robots = getattr(base, "robots", ())
+    if not robots:
+        return set()
+    gripper = robots[0].gripper
+    return {name for name, obj in base.objects_dict.items() if base._check_grasp(gripper, obj)}  # noqa: SLF001
+
+
+def _translate_objects(env, names: set[str], delta: np.ndarray) -> None:
+    """Translate the given objects' free joints by a world-space xyz delta."""
+    if not names:
+        return
+    base = env.env
+    objects = getattr(base, "objects_dict", {}) or {}
+    sim = base.sim
+    delta = np.asarray(delta, np.float64).reshape(3)
+    for name in names:
+        obj = objects.get(name)
+        joints = getattr(obj, "joints", None)
+        if not joints:
+            continue
+        joint = joints[-1]
+        addr = sim.model.get_joint_qpos_addr(joint)
+        if not isinstance(addr, tuple) or addr[1] - addr[0] != 7:
+            continue
+        qpos = np.array(sim.data.qpos[addr[0] : addr[1]], dtype=np.float64, copy=True)
+        qpos[:3] += delta
+        sim.data.set_joint_qpos(joint, qpos)
+    sim.forward()
+
+
 def _apply_start_perturbations(
     env,
     rng: np.random.Generator,
@@ -198,12 +233,20 @@ def _apply_start_perturbations(
     object_xy_m: float,
     all_objects: bool,
 ) -> None:
+    grasped = _grasped_object_names(env)
     if object_xy_m > 0.0:
-        names = _perturb_objects_xy(env, rng, object_xy_m, all_objects=all_objects)
+        names = _perturb_objects_xy(
+            env,
+            rng,
+            object_xy_m,
+            all_objects=all_objects,
+            grasped=grasped,
+        )
         logger.debug("perturbed objects (xy +-%.3fm): %s", object_xy_m, names)
     if eef_xyz_m > 0.0:
         delta = _perturb_eef_xyz(env, rng, eef_xyz_m)
         logger.debug("perturbed EEF start by %s", np.round(delta, 4))
+        _translate_objects(env, grasped, delta)
     env.env.sim.forward()
 
 
@@ -216,15 +259,9 @@ def _reset_env_to(
     eef_xyz_m: float = 0.0,
     object_xy_m: float = 0.0,
     all_objects: bool = False,
+    grip: float = -1.0,
 ):
-    """Reset a raw LIBERO env to a specific trial init state, then settle.
-
-    env.reset() -> env.set_init_state(init_state) -> optional start-state
-    perturbation -> RESET_SETTLE_STEPS no-op steps.  The perturbation is applied
-    after the init state (which overwrites sampler placements) and before the
-    settle steps.  If init_state is None, falls back to a plain reset (the old
-    behaviour) so callers without an init state still work.
-    """
+    """Reset to a trial/bottleneck state, perturb it, and settle."""
     obs = env.reset()
     if init_state is None:
         return obs
@@ -239,8 +276,15 @@ def _reset_env_to(
             object_xy_m=object_xy_m,
             all_objects=all_objects,
         )
+    # set_init_state moves the arm away from the pose used by env.reset(), but
+    # the OSC controller still targets that reset pose.  Re-anchor it.
+    robot = env.env.robots[0]
+    robot.controller.update_initial_joints(
+        np.array(robot._joint_positions, dtype=np.float64, copy=True)  # noqa: SLF001
+    )
+    settle = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, grip], np.float32)
     for _ in range(RESET_SETTLE_STEPS):
-        obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+        obs, _, _, _ = env.step(settle)
     return obs
 
 
@@ -677,9 +721,7 @@ def _libero_env_worker(parent: mp_connection.Connection, child: mp_connection.Co
             elif cmd == "reset":
                 child.send(_attach_subgoal(env.reset(), subgoal_eval))
             elif cmd == "reset_to":
-                # reset + set_init_state + optional start-state perturbation +
-                # settle, done child-side (one round trip).
-                init_state, perturb = data
+                init_state, perturb, grip = data
                 child.send(
                     _attach_subgoal(
                         _reset_env_to(
@@ -690,10 +732,17 @@ def _libero_env_worker(parent: mp_connection.Connection, child: mp_connection.Co
                             eef_xyz_m=float(getattr(env_fn, "perturb_eef_xyz_m", 0.0)),
                             object_xy_m=float(getattr(env_fn, "perturb_object_xy_m", 0.0)),
                             all_objects=bool(getattr(env_fn, "perturb_all_objects", False)),
+                            grip=float(grip),
                         ),
                         subgoal_eval,
                     )
                 )
+            elif cmd == "get_state":
+                # Full flattened MuJoCo state (same format as LIBERO's trial
+                # init states).  Teleop uses this to snapshot a bottleneck
+                # start so training can restore the exact scene there.
+                state = env.env.sim.get_state().flatten()
+                child.send(np.array(state, dtype=np.float64, copy=True))
             elif cmd == "reconfigure":
                 # swap the env to a new task (bddl). `data` is a fresh env_fn
                 # (_LiberoEnvFn) built by the parent for the target task. Mirrors
@@ -801,8 +850,13 @@ class _SubprocEnv:
         self._parent.send(("reset", None))
         return self._recv()
 
-    def reset_to(self, init_state):
-        self._parent.send(("reset_to", (init_state, bool(self.perturb))))
+    def reset_to(self, init_state, *, grip: float = -1.0):
+        self._parent.send(("reset_to", (init_state, bool(self.perturb), float(grip))))
+        return self._recv()
+
+    def get_state(self):
+        """Snapshot the full flattened MuJoCo state (for bottleneck labels)."""
+        self._parent.send(("get_state", None))
         return self._recv()
 
     def reconfigure(self, env_fn):
@@ -907,17 +961,16 @@ class _EpState:
 
     __slots__ = ("chunks", "done", "env", "init_state", "obs", "steps", "success", "task_id", "tok_mask", "tok_prompt")
 
-    def __init__(self, env, tok_prompt, tok_mask, task_id, init_state=None):
+    def __init__(self, env, tok_prompt, tok_mask, task_id, init_state=None, reset_grip=-1.0):
         self.env = env
         self.tok_prompt = tok_prompt
         self.tok_mask = tok_mask
         self.task_id = task_id
-        # the trial init state this episode starts from. None -> plain reset.
         self.init_state = init_state
-        self.reset()
+        self.reset(grip=reset_grip)
 
-    def reset(self):
-        self.obs = self.env.reset_to(self.init_state)
+    def reset(self, *, grip: float = -1.0):
+        self.obs = self.env.reset_to(self.init_state, grip=grip)
         self.done = False
         self.success = False
         self.steps = 0
@@ -1139,6 +1192,8 @@ class EnvWorker:
         task: int | None = None,
         trial_offset: int = 0,
         n_active: int | None = None,
+        init_state_override=None,
+        reset_grip: float = -1.0,
     ) -> list[_EpState]:
         """Build the episode pool for one rollout/eval (slot order == buffer batch axis).
 
@@ -1167,6 +1222,10 @@ class EnvWorker:
         would cost an EGL/MuJoCo rebuild per iteration. Slots are taken from the FRONT,
         so a capped rollout always uses slots [0, n_active) and `_reconfigure_slot`
         leaves the rest on whatever task they last held.
+
+        ``init_state_override`` replaces slot 0's trial init state (used to restore a
+        recorded bottleneck start).  ``reset_grip`` is the gripper command held
+        during the settle steps.
         """
         group_size = max(1, self.group_size)
         m = self.batch_size if n_active is None else max(1, min(int(n_active), self.batch_size))
@@ -1192,9 +1251,20 @@ class EnvWorker:
             self._reconfigure_slot(slot_idx, ltid)
             tok_t, mask_t, _ = self._task_tok[ltid]
             init_state = self._task_init_states[ltid][trial]
+            if init_state_override is not None and slot_idx == 0:
+                init_state = np.asarray(init_state_override)
             env = self._slot_envs[slot_idx]
             env.perturb = self.perturb_enabled
-            pool.append(_EpState(env, tok_t, mask_t, ltid, init_state=init_state))
+            pool.append(
+                _EpState(
+                    env,
+                    tok_t,
+                    mask_t,
+                    ltid,
+                    init_state=init_state,
+                    reset_grip=reset_grip,
+                )
+            )
         return pool
 
     def set_perturb(self, *, enabled: bool) -> None:
@@ -1214,6 +1284,13 @@ class EnvWorker:
         """Natural-language instruction for a LIBERO task id."""
         try:
             return self._task_tok[int(task_id)][2]
+        except KeyError as exc:
+            raise ValueError(f"task id {task_id} is not in this pool's task set {self.task_ids}") from exc
+
+    def init_state_shape(self, task_id: int) -> tuple[int, ...]:
+        """Shape of this task's canonical flattened MuJoCo init states."""
+        try:
+            return np.asarray(self._task_init_states[int(task_id)][0]).shape
         except KeyError as exc:
             raise ValueError(f"task id {task_id} is not in this pool's task set {self.task_ids}") from exc
 
@@ -1248,7 +1325,7 @@ class _BridgeSlotProxy:
         """
         self._telemetry = tel
 
-    def reset_to(self, init_state: dict) -> dict:
+    def reset_to(self, init_state: dict, *, grip: float = -1.0) -> dict:
         self._channel.push_command({"type": "reset", "task_id": init_state["task_id"], "trial": init_state["trial"]})
         # The robot's ready ping (sent right on connect, obs=None -- see
         # robot_bridge.py's WIRE PROTOCOL note) arrives before the
