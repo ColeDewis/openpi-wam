@@ -116,6 +116,8 @@ def save_run_config(cfg: LearnerConfig) -> None:
         "bottleneck_label": bool(getattr(cfg, "bottleneck_label", False)),
         "dmp_gripper": bool(getattr(cfg, "dmp_gripper", False)),
         "residual_max": float(getattr(cfg, "residual_max", 1.0)),
+        "reward": str(getattr(cfg, "reward", "sparse")),
+        "intervention_penalty": float(getattr(cfg, "intervention_penalty", 0.0)),
     }
     (Path(cfg.checkpoint_dir) / "config.json").write_text(json.dumps(payload, indent=2))
 

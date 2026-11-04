@@ -574,6 +574,11 @@ class SimConfig:
     """CLI config for the LIBERO RLPD/HG-Dagger loop."""
 
     algorithm: Literal["rlpd", "hgdagger"] = "rlpd"
+    reward: Literal["sparse", "intervention_length"] = "sparse"
+    """sparse: terminal success = 1.0. intervention_length: terminal success = 1.0
+    plus intervention_penalty on every active human-takeover step."""
+    intervention_penalty: float = -0.02
+    """Reward added per active intervention timestep (must be <= 0)."""
     suite: str = "libero_goal"
     task_id: int = 0
     seed: int = 42
@@ -651,6 +656,14 @@ class SimConfig:
     def __post_init__(self):
         if self.suite not in _MAX_STEPS:
             raise ValueError(f"unknown LIBERO suite {self.suite!r}; expected one of {tuple(_MAX_STEPS)}")
+        if self.reward not in ("sparse", "intervention_length"):
+            raise ValueError(f"reward must be 'sparse' or 'intervention_length', got {self.reward!r}")
+        if self.intervention_penalty > 0.0:
+            raise ValueError(
+                f"intervention_penalty must be <= 0 (it is a reward penalty), got {self.intervention_penalty}"
+            )
+        if self.algorithm == "hgdagger" and self.reward != "sparse":
+            print("[reward] HG-Dagger ignores rewards; --reward intervention_length has no effect.")
         self.image_size = tuple(self.image_size)
         self.demo_path = tuple(self.demo_path)
         self.max_episode_steps = int(self.max_episode_steps) or _MAX_STEPS[self.suite]
@@ -884,6 +897,7 @@ class HilLiberoTrainer:
         self._collected_episodes = int(stats.get("collected_episodes", 0))
         self._training_seconds = float(stats.get("training_seconds", 0.0))
         self._demo_files_seen = set(stats.get("demo_files", ()))
+        self._intervention_steps = int(stats.get("intervention_steps", 0))
 
     def _elapsed_seconds(self) -> float:
         if self._session_start is None:
@@ -901,6 +915,7 @@ class HilLiberoTrainer:
             "online_episodes": self._online_episodes,
             "demo_episodes": self._demo_episodes,
             "collected_episodes": self._collected_episodes,
+            "intervention_steps": self._intervention_steps,
             "training_seconds": round(self._elapsed_seconds(), 1),
             "demo_files": sorted(self._demo_files_seen),
         }
@@ -933,9 +948,12 @@ class HilLiberoTrainer:
     def _status(self) -> dict:
         return {
             "task": self.task_name,
+            "reward": self.cfg.reward,
+            "intervention_penalty": self.cfg.intervention_penalty,
             "online_episodes": self._online_episodes,
             "demo_episodes": self._demo_episodes,
             "collected_episodes": self._collected_episodes,
+            "intervention_steps": self._intervention_steps,
             "training": self._elapsed(),
             "mode": self._mode,
             "learner_step": self._grad_step,
@@ -945,7 +963,7 @@ class HilLiberoTrainer:
     # -- base policy -------------------------------------------------------
 
     def _check_checkpoint_config(self) -> None:
-        """Refuse to restore a checkpoint trained with a different obs/action space."""
+        """Refuse to restore a checkpoint trained with a different obs/action/reward configuration."""
         config_path = Path(self.cfg.checkpoint_dir) / "config.json"
         if not config_path.exists():
             return
@@ -958,6 +976,12 @@ class HilLiberoTrainer:
         old_base = old.get("base_policy", "none")
         old_gripper = old.get("dmp_gripper")
         old_residual_max = old.get("residual_max")
+        old_reward = old.get("reward", "sparse")
+        old_penalty = float(old.get("intervention_penalty", 0.0))
+        reward_mismatch = old_reward != self.cfg.reward
+        penalty_mismatch = (
+            self.cfg.reward == "intervention_length" and abs(old_penalty - float(self.cfg.intervention_penalty)) > 1e-9
+        )
         if (
             (old_kind is not None and old_kind != self.cfg.encoder.kind)
             or (old_proprio is not None and int(old_proprio) != self.cfg.encoder.proprio_dim)
@@ -966,10 +990,12 @@ class HilLiberoTrainer:
             or old_base != self.cfg.base_policy
             or (old_gripper is not None and bool(old_gripper) != self.cfg.dmp_gripper)
             or (old_residual_max is not None and abs(float(old_residual_max) - self.cfg.residual_max) > 1e-9)
+            or reward_mismatch
+            or penalty_mismatch
         ):
             raise ValueError(
-                f"{config_path} was trained with a different observation/action space; "
-                "use a fresh --checkpoint-dir"
+                f"{config_path} was trained with a different observation/action/reward configuration "
+                f"(reward mode is stored in config.json); use a fresh --checkpoint-dir"
             )
 
     def _pose_from_state(self, state: np.ndarray) -> np.ndarray:
@@ -1306,7 +1332,13 @@ class HilLiberoTrainer:
                 print(f"[teleop] attempt {attempts}: no intervention; discard")
                 continue
             first = 0 if cfg.bottleneck_label else first_intervened
-            transitions = self._make_transitions(episode[first:], success=True)
+            # Teleop demos always keep the sparse success reward, regardless of
+            # the training reward mode. Precollected demos are untouched too.
+            transitions = self._make_transitions(
+                episode[first:],
+                success=True,
+                reward_mode="sparse",
+            )
             adjusted = [
                 {
                     "start": section["start"] - first,
@@ -1435,21 +1467,33 @@ class HilLiberoTrainer:
             self._recording_open = None
         return episode, success, sections
 
-    def _make_transitions(self, steps: list[dict], *, success: bool) -> list[dict]:
+    def _make_transitions(
+        self,
+        steps: list[dict],
+        *,
+        success: bool,
+        reward_mode: str | None = None,
+    ) -> list[dict]:
+        mode = self.cfg.reward if reward_mode is None else reward_mode
         out = []
         for i, step in enumerate(steps):
             last = i == len(steps) - 1
-            out.append(
-                make_transition(
-                    step["observations"],
-                    step["actions"],
-                    step["next_observations"],
-                    reward=1.0 if success and last else 0.0,
-                    done=last,
-                    intervened=step["intervened"],
-                    grasp_penalty=step["grasp_penalty"],
-                )
+            reward = 1.0 if success and last else 0.0
+            if mode == "intervention_length" and step.get("active", False):
+                reward += self.cfg.intervention_penalty
+            transition = make_transition(
+                step["observations"],
+                step["actions"],
+                step["next_observations"],
+                reward=reward,
+                done=last,
+                intervened=step["intervened"],
+                grasp_penalty=step["grasp_penalty"],
             )
+            # LIBERO-only diagnostic field; the replay buffer ignores extras.
+            if "active" in step:
+                transition["active"] = bool(step["active"])
+            out.append(transition)
         return out
 
     # -- episode loop ------------------------------------------------------
@@ -1643,6 +1687,7 @@ class HilLiberoTrainer:
                         "actions": residual_action,
                         "next_observations": next_enc,
                         "intervened": intervened,
+                        "active": active,
                         "grasp_penalty": penalty,
                     }
                 )
@@ -1712,9 +1757,19 @@ class HilLiberoTrainer:
             demo_steps += len(segment)
         if demo_steps:
             self._demo_episodes += 1
+        active_steps = sum(1 for transition in transitions if transition.get("active", False))
+        intervention_segments = 0
+        prev_active = False
+        for transition in transitions:
+            active = bool(transition.get("active", False))
+            if active and not prev_active:
+                intervention_segments += 1
+            prev_active = active
+        self._intervention_steps += active_steps
         self._save_stats()
         print(
             f"[flush] online={len(transitions)} demo={demo_steps} "
+            f"active={active_steps} segments={intervention_segments} "
             f"success={success} online_episodes={self._online_episodes} "
             f"demo_episodes={self._demo_episodes}"
         )
