@@ -9,6 +9,7 @@ A transition is a plain dict:
     masks             float32, 1 - dones
     dones             bool
     intervened        bool, True when a human takeover produced the action
+    active            bool, True while the human owns the robot (cost label)
     grasp_penalty     float32, <= 0 reward shaping for the gripper DQN only
 
 Directories:
@@ -35,7 +36,22 @@ class Demo:
     metadata: dict
 
 
-def make_transition(observations, actions, next_observations, reward, done, intervened, grasp_penalty=0.0):
+def make_transition(
+    observations,
+    actions,
+    next_observations,
+    reward,
+    done,
+    intervened,
+    active=None,
+    grasp_penalty=0.0,
+):
+    """Build one transition dict.
+
+    ``active`` is the intervention-cost label: True while the human owns the
+    robot. It defaults to ``intervened`` for the real-robot recorder, where a
+    detected takeover is the same thing.
+    """
     return {
         "observations": observations,
         "actions": np.asarray(actions, np.float32),
@@ -44,6 +60,7 @@ def make_transition(observations, actions, next_observations, reward, done, inte
         "masks": np.float32(1.0 - float(done)),
         "dones": bool(done),
         "intervened": bool(intervened),
+        "active": bool(intervened if active is None else active),
         "grasp_penalty": np.float32(grasp_penalty),
     }
 
@@ -98,22 +115,42 @@ def load_demo(path: Path | str) -> Demo:
     return Demo(list(data), [], {})
 
 
-def sync_transitions(directory: Path | str, seen: set[str], data_store=None) -> int:
-    """Insert pickles not seen before into ``data_store`` (or just count them)."""
+def episode_stats(transitions: list[dict]) -> tuple[int, int]:
+    """Return ``(active_steps, total_steps)`` for one episode."""
+    active_steps = sum(
+        bool(t.get("active", t.get("intervened", False))) for t in transitions
+    )
+    return active_steps, len(transitions)
+
+
+def sync_transitions(
+    directory: Path | str, seen: set[str], data_store=None
+) -> tuple[int, list[tuple[int, int]]]:
+    """Insert pickles not seen before into ``data_store`` (or just count them).
+
+    Returns the number of transitions added and one ``(active_steps,
+    total_steps)`` pair per pickle. The learner uses the pairs to maintain a
+    moving intervention-rate window.
+    """
     directory = Path(directory)
     if not directory.is_dir():
-        return 0
+        return 0, []
     added = 0
+    episodes = []
     for path in sorted(directory.glob("*.pkl")):
         if str(path) in seen:
             continue
         seen.add(str(path))
         transitions = load_demo(path).transitions
+        for transition in transitions:
+            # Old pickles predate the ``active`` field.
+            transition.setdefault("active", transition.get("intervened", False))
+        episodes.append(episode_stats(transitions))
         if data_store is not None:
             for transition in transitions:
                 data_store.insert(transition)
         added += len(transitions)
-    return added
+    return added, episodes
 
 
 class TransitionRecorder:
@@ -139,6 +176,13 @@ class TransitionRecorder:
         self._observations.append(observation)
         self._actions.append(np.asarray(action, np.float32))
         self._intervened.append(bool(intervened))
+
+    def stats(self) -> tuple[int, int]:
+        """Return ``(intervened_steps, total_steps)`` for the pending episode."""
+        n = len(self._observations) - 1
+        if n <= 0:
+            return 0, 0
+        return sum(self._intervened[:n]), n
 
     def _transitions(self, *, success: bool) -> list[dict]:
         n = len(self._observations) - 1

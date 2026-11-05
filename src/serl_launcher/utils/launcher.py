@@ -181,6 +181,7 @@ def make_sac_hybrid_agent(
     target_entropy=None,
     discount=0.97,
     soft_target_update_rate=0.005,
+    target_intervention_rate=0.05,
 ):
     """hil-serl's ``SACAgentHybridSingleArm`` (RLPD with a DQN gripper).
 
@@ -196,9 +197,11 @@ def make_sac_hybrid_agent(
             "std_max": 5,
         },
         critic_network_kwargs=mlp(),
+        cost_critic_network_kwargs=mlp(),
         grasp_critic_network_kwargs=mlp(),
         policy_network_kwargs=mlp(),
         temperature_init=1e-2,
+        target_intervention_rate=target_intervention_rate,
         discount=discount,
         soft_target_update_rate=soft_target_update_rate,
         backup_entropy=False,
@@ -243,6 +246,7 @@ def make_agent(
     target_entropy=None,
     discount=0.97,
     soft_target_update_rate=0.005,
+    target_intervention_rate=0.05,
 ):
     """Build the RLPD (``sac``) or HG-Dagger (``bc``) agent for an encoder kind.
 
@@ -265,6 +269,7 @@ def make_agent(
             target_entropy=target_entropy,
             discount=discount,
             soft_target_update_rate=soft_target_update_rate,
+            target_intervention_rate=target_intervention_rate,
         )
     if encoder_kind == "hilserl":
         if algorithm == "bc":

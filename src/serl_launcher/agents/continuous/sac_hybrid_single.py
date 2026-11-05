@@ -13,7 +13,7 @@ from serl_launcher.common.encoding import EncodingWrapper
 from serl_launcher.common.optimizers import make_optimizer
 from serl_launcher.common.typing import Batch, Data, Params, PRNGKey
 from serl_launcher.networks.actor_critic_nets import Critic, Policy, GraspCritic, ensemblize
-from serl_launcher.networks.lagrange import GeqLagrangeMultiplier
+from serl_launcher.networks.lagrange import GeqLagrangeMultiplier, LeqLagrangeMultiplier
 from serl_launcher.networks.mlp import MLP
 from serl_launcher.utils.train_utils import _unpack
 
@@ -104,6 +104,56 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         """
         return self.forward_grasp_critic(
             observations, rng=rng, grad_params=self.state.target_params
+        )
+
+    def forward_cost_critic(
+        self,
+        observations: Data,
+        actions: jax.Array,
+        rng: PRNGKey,
+        *,
+        grad_params: Optional[Params] = None,
+        train: bool = True,
+    ) -> jax.Array:
+        """Forward pass for the intervention-cost critic."""
+        if train:
+            assert rng is not None, "Must specify rng when training"
+        return self.state.apply_fn(
+            {"params": grad_params or self.state.params},
+            observations,
+            actions,
+            name="cost_critic",
+            rngs={"dropout": rng} if train else {},
+            train=train,
+        )
+
+    def forward_target_cost_critic(
+        self,
+        observations: Data,
+        actions: jax.Array,
+        rng: PRNGKey,
+    ) -> jax.Array:
+        return self.forward_cost_critic(
+            observations, actions, rng=rng, grad_params=self.state.target_params
+        )
+
+    def forward_intervention(
+        self, *, grad_params: Optional[Params] = None
+    ) -> jnp.ndarray:
+        """Return the current intervention-rate Lagrange multiplier."""
+        return self.state.apply_fn(
+            {"params": grad_params or self.state.params}, name="intervention"
+        )
+
+    def intervention_lagrange_penalty(
+        self, rate: jnp.ndarray, *, grad_params: Optional[Params] = None
+    ) -> jnp.ndarray:
+        """Lagrange penalty for the intervention-rate constraint."""
+        return self.state.apply_fn(
+            {"params": grad_params or self.state.params},
+            lhs=rate,
+            rhs=self.config["target_intervention_rate"],
+            name="intervention",
         )
 
     def forward_policy( # type: ignore              
@@ -288,12 +338,78 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         return grasp_critic_loss, info
 
+    def cost_critic_loss_fn(self, batch, params: Params, rng: PRNGKey):
+        """Bellman regression for the intervention-cost critic.
+
+        The per-step cost is the ``active`` takeover label. The loss is masked
+        to online transitions because the demo buffer contains only human
+        corrections and would bias the cost estimate upward.
+        """
+        batch_size = batch["rewards"].shape[0]
+        actions = batch["actions"][..., :-1]
+        online_mask = batch.get(
+            "online_mask", jnp.ones((batch_size,), dtype=jnp.float32)
+        )
+
+        rng, next_action_sample_key = jax.random.split(rng)
+        next_actions, _ = self._compute_next_actions(batch, next_action_sample_key)
+
+        target_next_cost_qs = self.forward_target_cost_critic(
+            batch["next_observations"], next_actions, rng=rng
+        )
+
+        if self.config["critic_subsample_size"] is not None:
+            rng, subsample_key = jax.random.split(rng)
+            subsample_idcs = jax.random.randint(
+                subsample_key,
+                (self.config["critic_subsample_size"],),
+                0,
+                self.config["critic_ensemble_size"],
+            )
+            target_next_cost_qs = target_next_cost_qs[subsample_idcs]
+
+        # Conservative cost-to-go; costs are non-negative.
+        target_next_cost_q = jnp.maximum(target_next_cost_qs.max(axis=0), 0.0)
+        cost = batch["active"].astype(jnp.float32)
+        target_cost_q = (
+            cost + self.config["discount"] * batch["masks"] * target_next_cost_q
+        )
+        chex.assert_shape(target_cost_q, (batch_size,))
+
+        predicted_cost_qs = self.forward_cost_critic(
+            batch["observations"], actions, rng=rng, grad_params=params
+        )
+        chex.assert_shape(
+            predicted_cost_qs, (self.config["critic_ensemble_size"], batch_size)
+        )
+        target_cost_qs = target_cost_q[None].repeat(
+            self.config["critic_ensemble_size"], axis=0
+        )
+        chex.assert_equal_shape([predicted_cost_qs, target_cost_qs])
+
+        mask_sum = jnp.maximum(online_mask.sum(), 1.0)
+        cost_critic_loss = jnp.sum(
+            online_mask * jnp.mean((predicted_cost_qs - target_cost_qs) ** 2, axis=0)
+        ) / mask_sum
+
+        info = {
+            "cost_critic_loss": cost_critic_loss,
+            "predicted_cost_qs": jnp.sum(
+                online_mask * predicted_cost_qs.mean(axis=0)
+            )
+            / mask_sum,
+            "target_cost_qs": jnp.sum(online_mask * target_cost_q) / mask_sum,
+            "cost_labels": jnp.sum(online_mask * cost) / mask_sum,
+        }
+
+        return cost_critic_loss, info
 
     def policy_loss_fn(self, batch, params: Params, rng: PRNGKey):
         batch_size = batch["rewards"].shape[0]
         temperature = self.forward_temperature()
+        intervention_multiplier = self.forward_intervention()
 
-        rng, policy_rng, sample_rng, critic_rng = jax.random.split(rng, 4)
+        rng, policy_rng, sample_rng, critic_rng, cost_rng = jax.random.split(rng, 5)
         action_distributions = self.forward_policy(
             batch["observations"], rng=policy_rng, grad_params=params
         )
@@ -308,13 +424,32 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         chex.assert_shape(predicted_q, (batch_size,))
         chex.assert_shape(log_probs, (batch_size,))
 
+        predicted_cost_qs = self.forward_cost_critic(
+            batch["observations"], actions, rng=cost_rng
+        )
+        predicted_cost_q = jnp.maximum(predicted_cost_qs.max(axis=0), 0.0)
+        chex.assert_shape(predicted_cost_q, (batch_size,))
+
+        # Mask the cost term to online rows: demo transitions are human
+        # corrections, not policy behavior, and would bias the cost estimate.
+        online_mask = batch.get(
+            "online_mask", jnp.ones((batch_size,), dtype=jnp.float32)
+        )
+        mask_sum = jnp.maximum(online_mask.sum(), 1.0)
+        # (1 - discount) turns the discounted cost-to-go into a rate estimate.
+        cost_rate = (1.0 - self.config["discount"]) * predicted_cost_q
+        cost_rate = jnp.sum(online_mask * cost_rate) / mask_sum
+
         actor_objective = predicted_q - temperature * log_probs
-        actor_loss = -jnp.mean(actor_objective)
+        actor_loss = -jnp.mean(actor_objective) + intervention_multiplier * cost_rate
 
         info = {
             "actor_loss": actor_loss,
             "temperature": temperature,
             "entropy": -log_probs.mean(),
+            "predicted_cost_q": jnp.sum(online_mask * predicted_cost_q) / mask_sum,
+            "cost_rate": cost_rate,
+            "intervention_multiplier": intervention_multiplier,
         }
 
         return actor_loss, info
@@ -332,12 +467,30 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         )
         return temperature_loss, {"temperature_loss": temperature_loss}
     
-    def loss_fns(self, batch):
+    def intervention_loss_fn(self, rate, params: Params, rng: PRNGKey):
+        """Dual ascent on the measured intervention rate."""
+        rate = jnp.asarray(rate)
+        intervention_loss = self.intervention_lagrange_penalty(
+            rate,
+            grad_params=params,
+        )
+        multiplier = self.forward_intervention()
+        return intervention_loss, {
+            "intervention_loss": intervention_loss,
+            "intervention_rate": rate,
+            "intervention_multiplier": multiplier,
+        }
+
+    def loss_fns(self, batch, intervention_rate=None):
+        if intervention_rate is None:
+            intervention_rate = self.config["target_intervention_rate"]
         return {
             "critic": partial(self.critic_loss_fn, batch),
             "grasp_critic": partial(self.grasp_critic_loss_fn, batch),
+            "cost_critic": partial(self.cost_critic_loss_fn, batch),
             "actor": partial(self.policy_loss_fn, batch),
             "temperature": partial(self.temperature_loss_fn, batch),
+            "intervention": partial(self.intervention_loss_fn, intervention_rate),
         }
 
     @partial(jax.jit, static_argnames=("pmap_axis", "networks_to_update"))
@@ -347,7 +500,14 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         *,
         pmap_axis: Optional[str] = None,
         networks_to_update: FrozenSet[str] = frozenset(
-            {"actor", "critic", "grasp_critic", "temperature"}
+            {
+                "actor",
+                "critic",
+                "grasp_critic",
+                "cost_critic",
+                "temperature",
+                "intervention",
+            }
         ),
         **kwargs
     ) -> Tuple["SACAgentHybridSingleArm", dict]:
@@ -361,6 +521,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             networks_to_update: Names of networks to update (default: all networks).
                 For example, in high-UTD settings it's common to update the critic
                 many times and only update the actor (and other networks) once.
+            intervention_rate: Optional measured intervention rate for the
+                Lagrange dual update; defaults to the configured target.
         Returns:
             Tuple of (new agent, info dict).
         """
@@ -450,7 +612,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         actor_def: nn.Module,
         critic_def: nn.Module,
         grasp_critic_def: nn.Module,
+        cost_critic_def: nn.Module,
         temperature_def: nn.Module,
+        intervention_def: nn.Module,
         # Optimizer
         actor_optimizer_kwargs={
             "learning_rate": 3e-4,
@@ -461,13 +625,20 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         grasp_critic_optimizer_kwargs={
             "learning_rate": 3e-4,
         },
+        cost_critic_optimizer_kwargs={
+            "learning_rate": 3e-4,
+        },
         temperature_optimizer_kwargs={
+            "learning_rate": 3e-4,
+        },
+        intervention_optimizer_kwargs={
             "learning_rate": 3e-4,
         },
         # Algorithm config
         discount: float = 0.95,
         soft_target_update_rate: float = 0.005,
         target_entropy: Optional[float] = None,
+        target_intervention_rate: float = 0.05,
         entropy_per_dim: bool = False,
         backup_entropy: bool = False,
         critic_ensemble_size: int = 2,
@@ -481,7 +652,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "actor": actor_def,
             "critic": critic_def,
             "grasp_critic": grasp_critic_def,
+            "cost_critic": cost_critic_def,
             "temperature": temperature_def,
+            "intervention": intervention_def,
         }
 
         model_def = ModuleDict(networks)
@@ -491,7 +664,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "actor": make_optimizer(**actor_optimizer_kwargs),
             "critic": make_optimizer(**critic_optimizer_kwargs),
             "grasp_critic": make_optimizer(**grasp_critic_optimizer_kwargs),
+            "cost_critic": make_optimizer(**cost_critic_optimizer_kwargs),
             "temperature": make_optimizer(**temperature_optimizer_kwargs),
+            "intervention": make_optimizer(**intervention_optimizer_kwargs),
         }
 
         rng, init_rng = jax.random.split(rng)
@@ -501,7 +676,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             actor=[observations],
             critic=[observations, actions[..., :-1]],
             grasp_critic=[observations],
+            cost_critic=[observations, actions[..., :-1]],
             temperature=[],
+            intervention=[],
         )["params"]
 
         rng, create_rng = jax.random.split(rng)
@@ -526,6 +703,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                 discount=discount,
                 soft_target_update_rate=soft_target_update_rate,
                 target_entropy=target_entropy,
+                target_intervention_rate=target_intervention_rate,
                 backup_entropy=backup_entropy,
                 image_keys=image_keys,
                 reward_bias=reward_bias,
@@ -546,6 +724,9 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         critic_network_kwargs: dict = {
             "hidden_dims": [256, 256],
         },
+        cost_critic_network_kwargs: dict = {
+            "hidden_dims": [256, 256],
+        },
         grasp_critic_network_kwargs: dict = {
             "hidden_dims": [128, 128],
         },
@@ -559,6 +740,8 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         critic_ensemble_size: int = 2,
         critic_subsample_size: Optional[int] = None,
         temperature_init: float = 1.0,
+        intervention_init: float = 1.0,
+        target_intervention_rate: float = 0.05,
         image_keys: Iterable[str] = ("image",),
         augmentation_function: Optional[callable] = None,
         # Optional pre-built encoder (frozen RL-token / timm features); skips the image
@@ -573,6 +756,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         policy_network_kwargs["activate_final"] = True
         critic_network_kwargs["activate_final"] = True
+        cost_critic_network_kwargs["activate_final"] = True
 
         if encoder_def is None:
             if encoder_type == "resnet":
@@ -621,6 +805,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "critic": encoder_def,
             "actor": encoder_def,
             "grasp_critic": encoder_def,
+            "cost_critic": encoder_def,
         }
 
         # Define networks
@@ -631,7 +816,15 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         critic_def = partial(
             Critic, encoder=encoders["critic"], network=critic_backbone
         )(name="critic")
-        
+
+        cost_critic_backbone = partial(MLP, **cost_critic_network_kwargs)
+        cost_critic_backbone = ensemblize(cost_critic_backbone, critic_ensemble_size)(
+            name="cost_critic_ensemble"
+        )
+        cost_critic_def = partial(
+            Critic, encoder=encoders["cost_critic"], network=cost_critic_backbone
+        )(name="cost_critic")
+
         grasp_critic_backbone = MLP(**grasp_critic_network_kwargs)
         grasp_critic_def = partial(
             GraspCritic, encoder=encoders["grasp_critic"], network=grasp_critic_backbone
@@ -652,6 +845,12 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             name="temperature",
         )
 
+        intervention_def = LeqLagrangeMultiplier(
+            init_value=intervention_init,
+            constraint_shape=(),
+            name="intervention",
+        )
+
         agent = cls.create(
             rng,
             observations,
@@ -659,7 +858,10 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             actor_def=policy_def,
             critic_def=critic_def,
             grasp_critic_def=grasp_critic_def,
+            cost_critic_def=cost_critic_def,
             temperature_def=temperature_def,
+            intervention_def=intervention_def,
+            target_intervention_rate=target_intervention_rate,
             critic_ensemble_size=critic_ensemble_size,
             critic_subsample_size=critic_subsample_size,
             image_keys=image_keys,

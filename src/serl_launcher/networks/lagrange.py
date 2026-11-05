@@ -89,3 +89,6 @@ LeqLagrangeMultiplier = partial(
 BetterLeqLagrangeMultiplier = partial(
     LagrangeMultiplier, constraint_type="leq", parameterization="none"
 )
+# Note: with parameterization="none" the multiplier is not projected back to
+# non-negative values, so the optimizer can drive it negative. Prefer
+# LeqLagrangeMultiplier (softplus) when the multiplier must stay a penalty.

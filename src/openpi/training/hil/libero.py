@@ -5,12 +5,20 @@ and publishes weights every ``steps_per_update`` steps. Human interventions
 come from the browser gamepad page.
 
 Record:
-    uv run --extra libero scripts/train_hil_libero.py --record-demos 20 \
-        --bottleneck-label --demo-path demos/goal_t1 --suite libero_goal --task-id 1
+    cd /home/serg/projects/openpi-wam
+    uv run --extra libero /home/serg/projects/openpi-wam/scripts/train_hil_libero.py \
+        --record-demos 20 --bottleneck-label --suite libero_goal --task-id 1 \
+        --demo-path /home/serg/projects/openpi-wam/demos/dmp_t1 \
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_demos \
+        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/goal_t1_demos
 
 Train:
-    uv run --extra libero scripts/train_hil_libero.py --algorithm rlpd \
-        --base-policy dmp --demo-path demos/goal_t1 --suite libero_goal --task-id 1
+    cd /home/serg/projects/openpi-wam
+    uv run --extra libero /home/serg/projects/openpi-wam/scripts/train_hil_libero.py \
+        --algorithm rlpd --suite libero_goal --task-id 1 --base-policy dmp \
+        --demo-path /home/serg/projects/openpi-wam/demos/dmp_t1 \
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_rlpd_dmp_bottleneck_lagrange \
+        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/rlpd_goal_t1_dmp_bottleneck_lagrange
 
 Controls: OPTIONS/SHARE mark success/failure, D-pad up/down selects a
 bottleneck, D-pad left/right marks sections while recording and skips eval
@@ -58,6 +66,7 @@ from openpi.training.hil.action_adapter import ActionAdapter
 from openpi.training.hil.dmp import DmpPolicy
 from openpi.training.hil.dmp import combine_base_residual
 from openpi.training.hil.dmp import residual_target
+from openpi.training.hil.transitions import episode_stats
 from openpi.training.hil.transitions import load_demo
 from openpi.training.hil.transitions import make_transition
 from openpi.training.hil.transitions import save_demo
@@ -574,11 +583,10 @@ class SimConfig:
     """CLI config for the LIBERO RLPD/HG-Dagger loop."""
 
     algorithm: Literal["rlpd", "hgdagger"] = "rlpd"
-    reward: Literal["sparse", "intervention_length"] = "sparse"
-    """sparse: terminal success = 1.0. intervention_length: terminal success = 1.0
-    plus intervention_penalty on every active human-takeover step."""
-    intervention_penalty: float = -0.02
-    """Reward added per active intervention timestep (must be <= 0)."""
+    target_intervention_rate: float = 0.05
+    """Constrain human-takeover steps to this fraction of episode steps."""
+    intervention_window: int = 20
+    """Number of recent episodes used for the moving-average rate."""
     suite: str = "libero_goal"
     task_id: int = 0
     seed: int = 42
@@ -656,14 +664,15 @@ class SimConfig:
     def __post_init__(self):
         if self.suite not in _MAX_STEPS:
             raise ValueError(f"unknown LIBERO suite {self.suite!r}; expected one of {tuple(_MAX_STEPS)}")
-        if self.reward not in ("sparse", "intervention_length"):
-            raise ValueError(f"reward must be 'sparse' or 'intervention_length', got {self.reward!r}")
-        if self.intervention_penalty > 0.0:
+        if not 0.0 <= self.target_intervention_rate <= 1.0:
             raise ValueError(
-                f"intervention_penalty must be <= 0 (it is a reward penalty), got {self.intervention_penalty}"
+                "target_intervention_rate must be in [0, 1], "
+                f"got {self.target_intervention_rate}"
             )
-        if self.algorithm == "hgdagger" and self.reward != "sparse":
-            print("[reward] HG-Dagger ignores rewards; --reward intervention_length has no effect.")
+        if self.intervention_window <= 0:
+            raise ValueError(
+                f"intervention_window must be positive, got {self.intervention_window}"
+            )
         self.image_size = tuple(self.image_size)
         self.demo_path = tuple(self.demo_path)
         self.max_episode_steps = int(self.max_episode_steps) or _MAX_STEPS[self.suite]
@@ -807,6 +816,9 @@ class HilLiberoTrainer:
         self._training_seconds = 0.0
         self._session_start: float | None = None
         self._demo_files_seen: set[str] = set()
+        self.intervention_tracker = _learner.InterventionRateTracker(
+            cfg.intervention_window
+        )
         self._stop = threading.Event()
         self._learner_thread: threading.Thread | None = None
         self._learner_error: BaseException | None = None
@@ -863,6 +875,7 @@ class HilLiberoTrainer:
             target_entropy=None,
             discount=cfg.discount,
             soft_target_update_rate=0.005,
+            target_intervention_rate=cfg.target_intervention_rate,
         )
         _learner.save_run_config(cfg)
         latest = checkpoints.latest_checkpoint(cfg.checkpoint_dir)
@@ -916,6 +929,9 @@ class HilLiberoTrainer:
             "demo_episodes": self._demo_episodes,
             "collected_episodes": self._collected_episodes,
             "intervention_steps": self._intervention_steps,
+            "target_intervention_rate": self.cfg.target_intervention_rate,
+            "intervention_rate": self.intervention_tracker.rate,
+            "intervention_episodes": self.intervention_tracker.num_episodes,
             "training_seconds": round(self._elapsed_seconds(), 1),
             "demo_files": sorted(self._demo_files_seen),
         }
@@ -948,8 +964,9 @@ class HilLiberoTrainer:
     def _status(self) -> dict:
         return {
             "task": self.task_name,
-            "reward": self.cfg.reward,
-            "intervention_penalty": self.cfg.intervention_penalty,
+            "target_intervention_rate": self.cfg.target_intervention_rate,
+            "intervention_rate": round(self.intervention_tracker.rate, 4),
+            "intervention_episodes": self.intervention_tracker.num_episodes,
             "online_episodes": self._online_episodes,
             "demo_episodes": self._demo_episodes,
             "collected_episodes": self._collected_episodes,
@@ -963,7 +980,7 @@ class HilLiberoTrainer:
     # -- base policy -------------------------------------------------------
 
     def _check_checkpoint_config(self) -> None:
-        """Refuse to restore a checkpoint trained with a different obs/action/reward configuration."""
+        """Refuse to restore a checkpoint trained with a different configuration."""
         config_path = Path(self.cfg.checkpoint_dir) / "config.json"
         if not config_path.exists():
             return
@@ -976,12 +993,11 @@ class HilLiberoTrainer:
         old_base = old.get("base_policy", "none")
         old_gripper = old.get("dmp_gripper")
         old_residual_max = old.get("residual_max")
-        old_reward = old.get("reward", "sparse")
-        old_penalty = float(old.get("intervention_penalty", 0.0))
-        reward_mismatch = old_reward != self.cfg.reward
-        penalty_mismatch = (
-            self.cfg.reward == "intervention_length" and abs(old_penalty - float(self.cfg.intervention_penalty)) > 1e-9
-        )
+        old_target = old.get("target_intervention_rate")
+        # RLPD checkpoints predate the intervention-cost networks and cannot be
+        # restored. A different target rate is fine: the multiplier adapts.
+        # HG-Dagger uses the unchanged BC agent, so it can still restore.
+        predates_intervention = old_target is None and self.cfg.algorithm == "rlpd"
         if (
             (old_kind is not None and old_kind != self.cfg.encoder.kind)
             or (old_proprio is not None and int(old_proprio) != self.cfg.encoder.proprio_dim)
@@ -990,12 +1006,11 @@ class HilLiberoTrainer:
             or old_base != self.cfg.base_policy
             or (old_gripper is not None and bool(old_gripper) != self.cfg.dmp_gripper)
             or (old_residual_max is not None and abs(float(old_residual_max) - self.cfg.residual_max) > 1e-9)
-            or reward_mismatch
-            or penalty_mismatch
+            or predates_intervention
         ):
             raise ValueError(
-                f"{config_path} was trained with a different observation/action/reward configuration "
-                f"(reward mode is stored in config.json); use a fresh --checkpoint-dir"
+                f"{config_path} was trained with a different observation/action/intervention configuration "
+                "(or predates the intervention-cost networks); use a fresh --checkpoint-dir"
             )
 
     def _pose_from_state(self, state: np.ndarray) -> np.ndarray:
@@ -1268,6 +1283,12 @@ class HilLiberoTrainer:
             demo = load_demo(path)
             if not demo.transitions:
                 continue
+            # Demos recorded before the intervention-cost work lack ``active``
+            # (and possibly ``grasp_penalty``); default them so the buffers can
+            # accept the transitions.
+            for transition in demo.transitions:
+                transition.setdefault("active", transition.get("intervened", False))
+                transition.setdefault("grasp_penalty", 0.0)
             self._validate_demo_dims(demo.transitions, str(path))
 
             prepared_segments: list[list[dict]] = []
@@ -1332,12 +1353,11 @@ class HilLiberoTrainer:
                 print(f"[teleop] attempt {attempts}: no intervention; discard")
                 continue
             first = 0 if cfg.bottleneck_label else first_intervened
-            # Teleop demos always keep the sparse success reward, regardless of
-            # the training reward mode. Precollected demos are untouched too.
+            # Teleop demos keep the sparse success reward; precollected demos
+            # are untouched too.
             transitions = self._make_transitions(
                 episode[first:],
                 success=True,
-                reward_mode="sparse",
             )
             adjusted = [
                 {
@@ -1472,15 +1492,13 @@ class HilLiberoTrainer:
         steps: list[dict],
         *,
         success: bool,
-        reward_mode: str | None = None,
     ) -> list[dict]:
-        mode = self.cfg.reward if reward_mode is None else reward_mode
         out = []
         for i, step in enumerate(steps):
             last = i == len(steps) - 1
+            # Sparse success reward; intervention cost is handled by the
+            # Lagrange multiplier in the learner.
             reward = 1.0 if success and last else 0.0
-            if mode == "intervention_length" and step.get("active", False):
-                reward += self.cfg.intervention_penalty
             transition = make_transition(
                 step["observations"],
                 step["actions"],
@@ -1488,11 +1506,9 @@ class HilLiberoTrainer:
                 reward=reward,
                 done=last,
                 intervened=step["intervened"],
+                active=step.get("active", step["intervened"]),
                 grasp_penalty=step["grasp_penalty"],
             )
-            # LIBERO-only diagnostic field; the replay buffer ignores extras.
-            if "active" in step:
-                transition["active"] = bool(step["active"])
             out.append(transition)
         return out
 
@@ -1757,7 +1773,8 @@ class HilLiberoTrainer:
             demo_steps += len(segment)
         if demo_steps:
             self._demo_episodes += 1
-        active_steps = sum(1 for transition in transitions if transition.get("active", False))
+        active_steps, total_steps = episode_stats(transitions)
+        self.intervention_tracker.add_episode(active_steps, total_steps)
         intervention_segments = 0
         prev_active = False
         for transition in transitions:
@@ -1769,9 +1786,10 @@ class HilLiberoTrainer:
         self._save_stats()
         print(
             f"[flush] online={len(transitions)} demo={demo_steps} "
-            f"active={active_steps} segments={intervention_segments} "
-            f"success={success} online_episodes={self._online_episodes} "
-            f"demo_episodes={self._demo_episodes}"
+            f"active={active_steps} rate={active_steps / total_steps:.3f} "
+            f"avg_rate={self.intervention_tracker.rate:.3f} "
+            f"segments={intervention_segments} success={success} "
+            f"online_episodes={self._online_episodes} demo_episodes={self._demo_episodes}"
         )
 
     def _handle_selection(self, event: PadEvent, *, training: bool) -> bool:
@@ -1884,7 +1902,18 @@ class HilLiberoTrainer:
                         batch = _learner.mixed_batch(self.online, self.demo, cfg.batch_size)
                         agent, _ = agent.update(batch, networks_to_update=_learner.CRITIC_ONLY)
                     batch = _learner.mixed_batch(self.online, self.demo, cfg.batch_size)
-                    agent, info = agent.update(batch, networks_to_update=_learner.FULL_UPDATE)
+                    # Before the first episode completes, pass the target so
+                    # the multiplier does not decay for no reason.
+                    intervention_rate = (
+                        self.intervention_tracker.rate
+                        if self.intervention_tracker.num_episodes > 0
+                        else cfg.target_intervention_rate
+                    )
+                    agent, info = agent.update(
+                        batch,
+                        networks_to_update=_learner.FULL_UPDATE,
+                        intervention_rate=intervention_rate,
+                    )
                     n_updates = max(cfg.cta_ratio, 1)
                 else:
                     agent, info = agent.update(_learner.sample_buffer(self.demo, cfg.batch_size))
@@ -1897,10 +1926,11 @@ class HilLiberoTrainer:
                     self.actor_agent = jax.block_until_ready(agent)
                 if cfg.log_interval > 0 and step % cfg.log_interval == 0:
                     flat = _learner.flatten_info(info)
-                    rate = (step - log_step) / max(time.monotonic() - log_time, 1e-6)
+                    flat["intervention_episodes"] = self.intervention_tracker.num_episodes
+                    steps_per_s = (step - log_step) / max(time.monotonic() - log_time, 1e-6)
                     log_time, log_step = time.monotonic(), step
                     print(
-                        f"[learner step {step}] {rate:.1f} steps/s updates/env_step="
+                        f"[learner step {step}] {steps_per_s:.1f} steps/s updates/env_step="
                         f"{self._updates / max(self._env_steps, 1):.2f} | "
                         + " ".join(f"{k}={float(v):.4f}" for k, v in sorted(flat.items()))
                     )

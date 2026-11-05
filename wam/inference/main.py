@@ -254,7 +254,14 @@ class PiZeroTeleop:
             # on them with reward 0 and HG-Dagger keeps any human corrections
             # inside them. Only the HDF5 demo is discarded.
             if self.transition_recorder is not None:
+                active_steps, total_steps = self.transition_recorder.stats()
                 self.transition_recorder.flush(success=False)
+                rate = active_steps / max(total_steps, 1)
+                cprint(
+                    f"[RECORDER] intervention rate: {rate:.1%} "
+                    f"({active_steps}/{total_steps} steps)",
+                    "cyan",
+                )
             self._prev_state_dict = None
             self._intervention_streak = 0
             self.loop_state = "IDLE"
@@ -271,7 +278,14 @@ class PiZeroTeleop:
         
         self.recorder.save_episode(ep_name, metadata)
         if self.transition_recorder is not None:
+            active_steps, total_steps = self.transition_recorder.stats()
             self.transition_recorder.flush(success=True)
+            rate = active_steps / max(total_steps, 1)
+            cprint(
+                f"[RECORDER] intervention rate: {rate:.1%} "
+                f"({active_steps}/{total_steps} steps)",
+                "cyan",
+            )
         self._prev_state_dict = None
         self._intervention_streak = 0
         self.episode_counter += 1

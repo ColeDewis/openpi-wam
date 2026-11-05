@@ -34,6 +34,11 @@ class HilPolicy:
             raise FileNotFoundError(f"{config_path} not found — {checkpoint_dir} is not an RLPD/HG-Dagger run dir")
         config = json.loads(config_path.read_text())
         self.algorithm = config["algorithm"]  # "rlpd" | "hgdagger"
+        if self.algorithm == "rlpd" and config.get("target_intervention_rate") is None:
+            raise ValueError(
+                f"{config_path} predates the intervention-cost networks; "
+                "retrain with a fresh checkpoint directory"
+            )
         self.action_dim = int(config["action_dim"])
         self.base_policy = config.get("base_policy", "none")
         self.base_action_dim = int(config.get("base_action_dim", 0))

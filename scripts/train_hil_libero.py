@@ -1,12 +1,20 @@
 """Train RLPD or HG-Dagger in LIBERO with browser-gamepad interventions.
 
 Record:
-    uv run --extra libero scripts/train_hil_libero.py --record-demos 20 \
-        --bottleneck-label --demo-path demos/goal_t1 --suite libero_goal --task-id 1
+    cd /home/serg/projects/openpi-wam
+    uv run --extra libero /home/serg/projects/openpi-wam/scripts/train_hil_libero.py \
+        --record-demos 20 --bottleneck-label --suite libero_goal --task-id 1 \
+        --demo-path /home/serg/projects/openpi-wam/demos/dmp_t1 \
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_demos \
+        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/goal_t1_demos
 
 Train:
-    uv run --extra libero scripts/train_hil_libero.py --algorithm rlpd \
-        --base-policy dmp --demo-path demos/goal_t1 --suite libero_goal --task-id 1
+    cd /home/serg/projects/openpi-wam
+    uv run --extra libero /home/serg/projects/openpi-wam/scripts/train_hil_libero.py \
+        --algorithm rlpd --suite libero_goal --task-id 1 --base-policy dmp \
+        --demo-path /home/serg/projects/openpi-wam/demos/dmp_t1 \
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/libero_goal_t1_rlpd_dmp_bottleneck_lagrange \
+        --video-dir /home/serg/projects/openpi-wam/videos/hil_libero/rlpd_goal_t1_dmp_bottleneck_lagrange
 
 Controls:
     OPTIONS/SHARE: success/failure

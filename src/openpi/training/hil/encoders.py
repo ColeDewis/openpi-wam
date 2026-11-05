@@ -149,6 +149,7 @@ def make_encoder_agent(
     target_entropy: float | None = None,
     discount: float = 0.97,
     soft_target_update_rate: float = 0.005,
+    target_intervention_rate: float = 0.05,
 ):
     """RLPD (``sac``) or HG-Dagger (``bc``) agent for the configured encoder.
 
@@ -171,6 +172,7 @@ def make_encoder_agent(
         target_entropy=target_entropy,
         discount=discount,
         soft_target_update_rate=soft_target_update_rate,
+        target_intervention_rate=target_intervention_rate,
     )
 
 
@@ -179,6 +181,13 @@ def make_encoder_buffer(cfg: EncoderConfig, capacity: int, action_dim: int = 7):
     act_space = action_space(action_dim)
     if cfg.kind == "hilserl":
         return MemoryEfficientReplayBufferDataStore(
-            space, act_space, capacity, image_keys=cfg.image_keys, include_grasp_penalty=True
+            space,
+            act_space,
+            capacity,
+            image_keys=cfg.image_keys,
+            include_grasp_penalty=True,
+            include_active=True,
         )
-    return ReplayBufferDataStore(space, act_space, capacity, include_grasp_penalty=True)
+    return ReplayBufferDataStore(
+        space, act_space, capacity, include_grasp_penalty=True, include_active=True
+    )
