@@ -26,7 +26,7 @@ class HilPolicy:
         self,
         checkpoint_dir: str,
         action_scale: np.ndarray,
-        image_size: tuple[int, int] = (224, 224),
+        image_size: tuple[int, int] | None = None,
     ):
         self.checkpoint_dir = str(checkpoint_dir)
         config_path = Path(checkpoint_dir) / "config.json"
@@ -54,7 +54,10 @@ class HilPolicy:
             action_dim=self.action_dim,
         )
         self.agent = self.reload(self.agent)
-        self.encoder = make_encoder(self.encoder_config, image_size)
+        self.image_size = tuple(
+            self.encoder_config.image_size if image_size is None else image_size
+        )
+        self.encoder = make_encoder(self.encoder_config, self.image_size)
         # BC is deterministic at deployment (mode); SAC samples, matching the
         # upstream actor loop (``argmax=False``).
         self._argmax = self.algorithm == "hgdagger"
@@ -72,7 +75,7 @@ class HilPolicy:
         return self.encoder.encode(raw_obs)
 
     def act(self, raw_obs: dict) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Returns ``(wrench_action, normalized_action, encoded_observation)``."""
+        """Returns ``(delta_jp_action, normalized_action, encoded_observation)``."""
         observation = self.encode(raw_obs)
         self._rng, key = jax.random.split(self._rng)
         action = np.asarray(
@@ -82,5 +85,5 @@ class HilPolicy:
         return action * self.action_scale, action, observation
 
     def infer(self, raw_obs: dict) -> np.ndarray:
-        """OpenPIPolicy-compatible entry point: the 7-dim wrench chunk step."""
+        """OpenPIPolicy-compatible entry point: one delta-jp action step."""
         return self.act(raw_obs)[0]

@@ -1,4 +1,5 @@
 import argparse
+import collections
 import os
 import signal
 import struct
@@ -6,20 +7,14 @@ import time
 
 import cv2
 import numpy as np
-from pynput import keyboard
-from scipy.spatial.transform import Rotation
 from termcolor import cprint
 
 from openpi.training.hil.transitions import TransitionRecorder
 from wam.flir.multi_flir_manager import MultiFLIRManager
 from wam.inference.hdf5_recorder import HDF5Recorder
+from wam.inference.hil_encoder import discrete_gripper
 from wam.inference.hil_policy import HilPolicy
-from wam.inference.openpi_policy import KP_POS
-from wam.inference.openpi_policy import KP_ROT
-from wam.inference.openpi_policy import WAM_FORCE_LIMIT
-from wam.inference.openpi_policy import WAM_TORQUE_LIMIT
 from wam.inference.openpi_policy import OpenPIPolicy
-from wam.inference.openpi_policy import _rotvec_delta_to_rot_error
 from wam.inference.recorder_receiver import RecorderReceiver
 from wam.inference.udp_handler import TeleopUDPHandler
 
@@ -31,47 +26,65 @@ np.set_printoptions(precision=4, suppress=True)
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── intervention detection (from the UDP packet) ─────────────────────────────
-# A human takeover is inferred from the follower's measured external torque
-# (the operator pushes the arm) or from leader-arm joint velocity (the operator
-# moves the leader). Either signal, held for INTERVENTION_MIN_STEPS packets,
-# marks the step as intervened. All values are on the raw packet units.
-INTERVENTION_FOLLOWER_EXT_TORQUE_THRESHOLD = 1.0  # N·m
-INTERVENTION_LEADER_JOINT_VEL_THRESHOLD = 0.1  # rad/s
-INTERVENTION_MIN_STEPS = 1  # consecutive packets above threshold
-INTERVENTION_ACTION_DAMPING = 1.0  # scale on the derived human wrench
+# The controller reports a per-joint policy torque scale. A human takeover is
+# any scale above this threshold; tune it on the robot.
+INTERVENTION_POLICY_TORQUE_SCALE_THRESHOLD = 0.5
 
 # ── RL action normalization ──────────────────────────────────────────────────
-# The UDP action is a 7-dim wrench [fx, fy, fz, tx, ty, tz, gripper]. The SAC /
-# BC agents work in [-1, 1], so each channel is divided by these scales before
+# The RL action is 7 delta joint positions + a discrete gripper. The SAC / BC
+# agents work in [-1, 1], so each channel is divided by these scales before
 # being stored in a transition and multiplied back before sending.
-ACTION_FORCE_SCALE = 5.0  # matches WAM_FORCE_LIMIT
-ACTION_TORQUE_SCALE = 5.0  # matches WAM_TORQUE_LIMIT
+ACTION_JP_SCALE = 0.05  # rad per normalized step, matches the simulator
 ACTION_GRIPPER_SCALE = 1.0
-ACTION_SCALE = np.array(
-    [ACTION_FORCE_SCALE] * 3 + [ACTION_TORQUE_SCALE] * 3 + [ACTION_GRIPPER_SCALE],
-    np.float32,
-)
+ACTION_SCALE = np.array([ACTION_JP_SCALE] * 7 + [ACTION_GRIPPER_SCALE], np.float32)
+ACTION_DIM = len(ACTION_SCALE)
 
 # ── collection / deployment ──────────────────────────────────────────────────
 HIL_DATA_DIR = "./interventions"  # online/ and demo/ transition pickles
 HIL_POLICY_RELOAD_INTERVAL_S = 30.0  # pick up new learner checkpoints
+MAX_STATE_IMAGE_DT_NS = 100_000_000  # 100 ms state/image alignment tolerance
 
 
-def preprocess_image(
-    img_bgr: np.ndarray, crop_scale: float = 0.9, out_size=(224, 224)
-) -> np.ndarray:
-    """Center-crop by area 'crop_scale' and resize to out_size using OpenCV. Keeps image in BGR."""
-    H, W = img_bgr.shape[:2]
-    s = float(crop_scale) ** 0.5
-    crop_h, crop_w = int(round(H * s)), int(round(W * s))
+def precise_sleep(dt: float, slack_time: float = 0.001, time_func=time.monotonic):
+    """Sleep most of ``dt``, then spin for the remainder to reduce jitter."""
+    t_start = time_func()
+    if dt > slack_time:
+        time.sleep(dt - slack_time)
+    t_end = t_start + dt
+    while time_func() < t_end:
+        pass
 
-    y0 = max((H - crop_h) // 2, 0)
-    x0 = max((W - crop_w) // 2, 0)
 
-    img_cropped = img_bgr[y0 : y0 + crop_h, x0 : x0 + crop_w]
-    img_resized = cv2.resize(img_cropped, out_size, interpolation=cv2.INTER_AREA)
+def precise_wait(t_end: float, slack_time: float = 0.001, time_func=time.monotonic):
+    """Wait until ``t_end`` using a hybrid sleep/spin."""
+    t_start = time_func()
+    t_wait = t_end - t_start
+    if t_wait > 0:
+        t_sleep = t_wait - slack_time
+        if t_sleep > 0:
+            time.sleep(t_sleep)
+        while time_func() < t_end:
+            pass
 
-    return img_resized
+
+def preprocess_image(img_bgr: np.ndarray, out_size=(128, 128)) -> np.ndarray:
+    """Resize with padding, matching the simulator's ``resize_with_pad``.
+
+    OpenCV on the CPU is faster than a torch GPU resize for these small frames:
+    it avoids the host-to-device copy, kernel launch, and device-to-host copy.
+    """
+    h, w = img_bgr.shape[:2]
+    target_h, target_w = out_size
+    ratio = max(w / target_w, h / target_h)
+    new_h = int(h / ratio)
+    new_w = int(w / ratio)
+    resized = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    canvas = np.zeros((target_h, target_w, 3), np.uint8)
+    pad_h = (target_h - new_h) // 2
+    pad_w = (target_w - new_w) // 2
+    canvas[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
+    return canvas
 
 
 class PiZeroTeleop:
@@ -103,9 +116,10 @@ class PiZeroTeleop:
         self.display_scale = display_scale
         self.action_horizon = action_horizon
         self.loop_hz = loop_hz
-        self.send_interval = 0.5 # send interpolated points for 3 seconds
-        self.last_send_time = 0.0
+        self.dt = 1.0 / self.loop_hz
         self.policy_name = policy
+        self.image_size = (224, 224)
+        self.action_size = 7 if policy == "openpi" else ACTION_DIM
         # The hil policies are deployed from a trained checkpoint, which implies
         # inference even when --infer is omitted.
         self.doing_inference = infer or policy != "openpi"
@@ -114,18 +128,23 @@ class PiZeroTeleop:
         # UDP Configuration
         self.remote_ip = remote_ip
         self.send_port = send_port
-        self.recv_port = recv_port # not used
+        self.recv_port = recv_port
         self.DOF = dof
 
         # even though we listen to the follower we actually also get leader data, just dont do anything with it for now
         # also, leader data is just 0's if we dont start the leader
         self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
-        self.follower_sender = TeleopUDPHandler(self.remote_ip, self.send_port, DOF=self.DOF)
+        self.follower_sender = TeleopUDPHandler(
+            self.remote_ip,
+            self.send_port,
+            DOF=self.DOF,
+            action_size=self.action_size,
+        )
 
         # FLIR setup
         camera_configs = {
-            "wrist_image": wrist_cam_serial,
-            "front_image": front_cam_serial,
+            "wrist_image": {"serial": wrist_cam_serial},
+            "front_image": {"serial": front_cam_serial},
         }
         self.camera_manager = MultiFLIRManager(camera_configs)
         self.camera_manager.start_all()
@@ -143,9 +162,10 @@ class PiZeroTeleop:
                         f"--policy {policy} but {hil_checkpoint}/config.json was trained with "
                         f"encoder kind {self.policy.encoder_config.kind!r}"
                     )
+                self.image_size = self.policy.image_size
                 cprint(
                     f"[HIL] {self.policy.algorithm} policy loaded from {hil_checkpoint} "
-                    f"(encoder={policy})",
+                    f"(encoder={policy}, image_size={self.image_size})",
                     "green",
                 )
             else:
@@ -162,8 +182,10 @@ class PiZeroTeleop:
                 "cyan",
             )
         self._prev_state_dict = None
-        self._intervention_streak = 0
         self._last_policy_reload = time.time()
+        self._state_buffer = collections.deque(maxlen=200)
+        self._last_images = {}
+        self._last_image_ts = {}
 
         # Set up recorder
         self.loop_state = "IDLE"  # States: IDLE, RECORDING, PENDING
@@ -174,11 +196,11 @@ class PiZeroTeleop:
         self.joy_fd = None
         self._init_joystick()
 
-        self.kb_listener = keyboard.Listener(on_press=self._on_key_press)
-        self.kb_listener.start()
         cprint("Initialization complete. Running teleop loop...", "green")
-        cprint("Controls: [R] Start/Stop | [S] Save | [D] Discard", "cyan")
-        cprint("Joystick Controls: [o] Start/Stop/Save  | [x] Discard", "cyan")
+        cprint(
+            "Joystick Controls: OPTIONS ('o') Start/Pause/Save | SHARE ('x') Discard",
+            "cyan",
+        )
 
     def _init_joystick(self):
         """Initializes the joystick file descriptor in non-blocking mode."""
@@ -199,16 +221,16 @@ class PiZeroTeleop:
                 if not event_data:
                     break
 
-                time_msec, value, ev_type, number = struct.unpack('IhBB', event_data)
+                time_msec, value, ev_type, number = struct.unpack("IhBB", event_data)
 
                 # Remove the init event flag (0x80)
                 ev_type &= ~0x80
 
                 # ev_type == 1 means button event, value == 1 means pressed (down)
                 if ev_type == 0x01 and value == 1:
-                    if number == 1:  # 'o' button
+                    if number == 1:  # OPTIONS ('o')
                         self._handle_start_save_action()
-                    elif number == 0:  # 'x' button
+                    elif number == 0:  # SHARE ('x')
                         self._handle_discard_action()
 
         except BlockingIOError:
@@ -216,126 +238,82 @@ class PiZeroTeleop:
         except Exception as e:
             cprint(f"[SYSTEM] Error reading joystick: {e}", "red")
 
-
-    def _on_key_press(self, key):
-        """Asynchronous callback for keyboard events."""
-        try:
-            if hasattr(key, "char") and key.char is not None:
-                k = key.char.lower()
-
-                if k == "r":
-                    if self.loop_state == "IDLE" or self.loop_state == "RECORDING":
-                        self._handle_start_save_action()
-                elif k == "s":
-                    if self.loop_state == "PENDING":
-                        self._save_episode()
-                elif k == "d":
-                    self._handle_discard_action()
-        except Exception:
-            pass
-
     def _handle_start_save_action(self):
-        """Unified logic for 'r' / 's' on keyboard and 'o' on joystick."""
+        """OPTIONS: start, pause, or save the episode."""
         if self.loop_state == "IDLE":
             self.loop_state = "RECORDING"
-            cprint("\n[RECORDER] 🔴 EPISODE STARTED", "red", attrs=["bold"])
+            cprint("\n[RECORDER] EPISODE STARTED", "red", attrs=["bold"])
         elif self.loop_state == "RECORDING":
             self.loop_state = "PENDING"
-            cprint("\n[RECORDER] ⏸ EPISODE PAUSED", "yellow")
-            cprint("Press [S] or 'o' to Save, [D] or 'x' to Discard.", "cyan")
+            cprint("\n[RECORDER] EPISODE PAUSED", "yellow")
+            cprint("Press OPTIONS ('o') to Save, SHARE ('x') to Discard.", "cyan")
         elif self.loop_state == "PENDING":
             self._save_episode()
 
     def _handle_discard_action(self):
-        """Unified logic for 'd' on keyboard and 'x' on joystick."""
+        """SHARE: discard the episode."""
         if self.loop_state in ["RECORDING", "PENDING"]:
             self.recorder.clear()
             # Failed episodes are still valuable off-policy data: RLPD trains
             # on them with reward 0 and HG-Dagger keeps any human corrections
             # inside them. Only the HDF5 demo is discarded.
             if self.transition_recorder is not None:
-                active_steps, total_steps = self.transition_recorder.stats()
+                intervened_steps, total_steps = self.transition_recorder.stats()
                 self.transition_recorder.flush(success=False)
-                rate = active_steps / max(total_steps, 1)
+                rate = intervened_steps / max(total_steps, 1)
                 cprint(
                     f"[RECORDER] intervention rate: {rate:.1%} "
-                    f"({active_steps}/{total_steps} steps)",
+                    f"({intervened_steps}/{total_steps} steps)",
                     "cyan",
                 )
             self._prev_state_dict = None
-            self._intervention_streak = 0
             self.loop_state = "IDLE"
-            cprint("\n[RECORDER] 🗑 Episode discarded. Press [R] or 'o' to start a new one.", "red")
+            cprint(
+                "\n[RECORDER] Episode discarded. Press OPTIONS ('o') to start.",
+                "red",
+            )
 
     def _save_episode(self):
         """Handles packaging and saving the episode to disk."""
         ep_name = f"episode_{int(time.time())}_{self.episode_counter}"
-       
-        metadata = {
-            "action_horizon": self.action_horizon,
-            "dof": self.DOF
-        }
-        
+        metadata = {"action_horizon": self.action_horizon, "dof": self.DOF}
         self.recorder.save_episode(ep_name, metadata)
         if self.transition_recorder is not None:
-            active_steps, total_steps = self.transition_recorder.stats()
+            intervened_steps, total_steps = self.transition_recorder.stats()
             self.transition_recorder.flush(success=True)
-            rate = active_steps / max(total_steps, 1)
+            rate = intervened_steps / max(total_steps, 1)
             cprint(
                 f"[RECORDER] intervention rate: {rate:.1%} "
-                f"({active_steps}/{total_steps} steps)",
+                f"({intervened_steps}/{total_steps} steps)",
                 "cyan",
             )
         self._prev_state_dict = None
-        self._intervention_streak = 0
         self.episode_counter += 1
         self.loop_state = "IDLE"
-        cprint("[RECORDER] Ready for next episode. Press [R] or 'o' to start.", "cyan")
+        cprint(
+            "[RECORDER] Ready for next episode. Press OPTIONS ('o') to start.",
+            "cyan",
+        )
 
     def _detect_intervention(self, state_dict):
-        """Whether this packet represents a human takeover.
-
-        Uses only fields the existing RecorderReceiver packet already carries:
-        the follower's measured external torque and the leader's joint velocity.
-        The packet format is unchanged; this is pure post-processing.
-        """
-        torque = np.asarray(state_dict.get("follower_ext_torque", np.zeros(self.DOF)), np.float32)
-        leader_jv = np.asarray(state_dict.get("leader_jv", np.zeros(self.DOF)), np.float32)
-        active = (
-            np.linalg.norm(torque) > INTERVENTION_FOLLOWER_EXT_TORQUE_THRESHOLD
-            or np.linalg.norm(leader_jv) > INTERVENTION_LEADER_JOINT_VEL_THRESHOLD
+        """Whether the policy torque scale indicates a human takeover."""
+        scale = np.asarray(
+            state_dict.get("policy_torque_scale", np.zeros(self.DOF)),
+            np.float32,
         )
-        self._intervention_streak = self._intervention_streak + 1 if active else 0
-        return self._intervention_streak >= INTERVENTION_MIN_STEPS
+        return bool(
+            np.max(np.abs(scale)) > INTERVENTION_POLICY_TORQUE_SCALE_THRESHOLD
+        )
 
     def _intervention_action(self, state_dict):
-        """EE wrench equivalent to the human's realized correction.
-
-        The human's commanded action is not transmitted as a wrench, but the
-        follower's realized motion between two packets is. Convert that motion
-        with the same proportional gains OpenPIPolicy uses in the other
-        direction (``delta_to_wrench``), so the recorded action lives in the
-        exact space the RL agent outputs.
-        """
+        """Delta joint position equivalent to the human's realized correction."""
         if self._prev_state_dict is None:
-            return np.zeros(7, np.float32)
-        prev = self._prev_state_dict
-        dpos = np.asarray(state_dict["follower_cart_pos"], np.float32) - np.asarray(
-            prev["follower_cart_pos"], np.float32
-        )
-        force = np.clip(KP_POS * dpos, -WAM_FORCE_LIMIT, WAM_FORCE_LIMIT)
-        # Quaternion delta prev -> current, expressed as the same rotation
-        # error vector used by delta_to_wrench.
-        q_prev = Rotation.from_quat(np.roll(np.asarray(prev["follower_cart_rot"], np.float32), -1))
-        q_cur = Rotation.from_quat(np.roll(np.asarray(state_dict["follower_cart_rot"], np.float32), -1))
-        d_rotvec = (q_cur * q_prev.inv()).as_rotvec()
-        torque = np.clip(
-            KP_ROT * _rotvec_delta_to_rot_error(d_rotvec), -WAM_TORQUE_LIMIT, WAM_TORQUE_LIMIT
-        )
-        gripper = float(state_dict.get("gripper_pos", 0.0))
-        return INTERVENTION_ACTION_DAMPING * np.concatenate(
-            [force, torque, [np.clip(gripper, -1.0, 1.0)]]
-        ).astype(np.float32)
+            return np.zeros(ACTION_DIM, np.float32)
+        prev_jp = np.asarray(self._prev_state_dict["follower_jp"], np.float32)
+        jp = np.asarray(state_dict["follower_jp"], np.float32)
+        delta_jp = jp - prev_jp
+        gripper = discrete_gripper(float(state_dict.get("gripper_pos", 0.0)))
+        return np.concatenate([delta_jp, [gripper]]).astype(np.float32)
 
     def _maybe_reload_policy(self):
         """Pick up a newer learner checkpoint without restarting the actor."""
@@ -345,67 +323,53 @@ class PiZeroTeleop:
             return
         self._last_policy_reload = time.time()
         try:
-            self.policy = self.policy.reload()
+            self.policy.agent = self.policy.reload()
             cprint("[HIL] policy checkpoint reloaded", "green")
         except Exception as e:
             cprint(f"[HIL] policy reload skipped: {e}", "yellow")
 
     def _read_images(self):
-        status, raw_frames = self.camera_manager.read_all()
-        if not status:
-            return False, None
+        new_frames = self.camera_manager.read_all()
+        for name, (img_bgr, timestamp_ns) in new_frames.items():
+            proc_img = preprocess_image(img_bgr, out_size=self.image_size)
+            self._last_images[name] = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
+            self._last_image_ts[name] = timestamp_ns
 
-        # TODO: we really shouldn't be doing this here, it would make more sense
-        # for the policy to preprocess itself.
-        processed_frames = {}
-        for name, img_bgr in raw_frames.items():
-            proc_img = preprocess_image(img_bgr)
-            processed_frames[name] = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
+        if len(self._last_images) < len(self.camera_manager.streams):
+            return False, None, None
 
-        return True, processed_frames
+        image_ts = max(self._last_image_ts.values())
+        return True, dict(self._last_images), image_ts
 
     def _read_state(self):
         if self.offline:
-            jp_state = np.array([0, 0.2, 1.5, -1.5, 0, 0, 0])
-            state_dict = {"follower_jp": jp_state}
-            status = True
+            state_dict = {
+                "follower_jp": np.array([0, 0.2, 1.5, -1.5, 0, 0, 0], np.float32),
+                "gripper_pos": 0.0,
+                "policy_torque_scale": np.zeros(self.DOF, np.float32),
+                "timestamp_ns": time.time_ns(),
+            }
+            packets = [state_dict]
         else:
-            state_dict = self.follower_listener.receive_latest_data()
-            status = state_dict is not None
+            packets = self.follower_listener.receive_all_new()
 
-        if self.debug:
-            # cprint(f"Robot State [jp]: {np.round(state_dict['follower_state']['jp'], 3)}", "yellow")
-            # cprint(f"Robot State [jv]: {np.round(state_dict['follower_state']['jv'], 3)}", "yellow")
-            # cprint(f"Robot State [ext_torque]: {np.round(state_dict['follower_state']['ext_torque'], 3)}", "yellow")
-            # cprint(f"Robot State [meas_torque]: {np.round(state_dict['follower_state']['meas_torque'], 3)}", "yellow")
-            # cprint(f"Robot State [cart_pos]: {np.round(state_dict['follower_state']['cart_pos'], 3)}", "yellow")
-            # cprint(f"Robot State [cart_rot]: {np.round(state_dict['follower_state']['cart_rot'], 3)}", "yellow")
-            # cprint(f"Robot State [gripper]: {np.round(state_dict['follower_state']['gripper'], 3)}", "yellow")
-            # cprint(f"Robot State [timestamp_ns]: {state_dict['follower_state']['timestamp_ns']}", "yellow")
-            pass
+        for state_dict in packets:
+            self._state_buffer.append(state_dict)
+        return bool(packets) or bool(self._state_buffer)
 
-        return status, state_dict
+    def _match_state(self, image_ts):
+        """Pick the low-dim packet closest to the camera timestamp."""
+        if not self._state_buffer:
+            return None
+        state_dict = min(
+            self._state_buffer,
+            key=lambda state: abs(int(state["timestamp_ns"]) - image_ts),
+        )
+        if abs(int(state_dict["timestamp_ns"]) - image_ts) > MAX_STATE_IMAGE_DT_NS:
+            return None
+        return state_dict
 
     def _update_displays(self, front_image, wrist_image):
-        debug_front = cv2.cvtColor(front_image, cv2.COLOR_RGB2BGR)
-        debug_wrist = cv2.cvtColor(wrist_image, cv2.COLOR_RGB2BGR)
-        try:
-            pass
-            # cv2.imshow(
-            #     "Wrist",
-            #     cv2.resize(
-            #         debug_wrist, (224 * self.display_scale, 224 * self.display_scale)
-            #     ),
-            # )
-            # cv2.imshow(
-            #     "Front",
-            #     cv2.resize(
-            #         debug_front, (224 * self.display_scale, 224 * self.display_scale)
-            #     ),
-            # )
-        except Exception as e:
-            print(e)
-
         return cv2.waitKey(1) & 0xFF != ord("q")
 
     def shutdown(self):
@@ -440,31 +404,43 @@ class PiZeroTeleop:
 
             signal.signal(signal.SIGINT, force_shutdown)
 
-            loop_delay = 1 / self.loop_hz
             waiting_counter = 0
+            t_start = time.monotonic()
+            iter_idx = 0
             while self.system_running:
-                loop_start_time = time.time()
+                t_cycle_end = t_start + (iter_idx + 1) * self.dt
 
                 self._poll_joystick()
 
-                # Read images
-                img_status, image_dict = self._read_images()
-                state_status, state_dict = self._read_state()
+                # Read images and drain every new low-dim packet.
+                img_status, image_dict, image_ts = self._read_images()
+                state_status = self._read_state()
 
                 if not state_status:
                     if waiting_counter == 10:
                         cprint("waiting for messages", "yellow")
                         waiting_counter = 0
                     waiting_counter += 1
+                    precise_wait(t_cycle_end)
+                    iter_idx += 1
                     continue
 
                 if self.debug:
                     cv2.waitKey(1)
 
-                if not img_status or not state_status:
+                if not img_status:
                     cprint("State or images not received yet, waiting...", "red")
-                    time.sleep(loop_delay)
+                    precise_wait(t_cycle_end)
+                    iter_idx += 1
                     continue
+
+                state_dict = self._match_state(image_ts)
+                if state_dict is None:
+                    cprint("state/image timestamps not aligned, waiting...", "red")
+                    precise_wait(t_cycle_end)
+                    iter_idx += 1
+                    continue
+
                 obs = image_dict.copy()
                 obs["low_dim"] = state_dict
 
@@ -480,7 +456,6 @@ class PiZeroTeleop:
                     self.recorder.add_step(obs)
 
                 # Infer + send to WAM
-                # if (loop_start_time - self.last_send_time) >= self.send_interval:
                 if self.doing_inference and self.loop_state == "RECORDING":
                     if self.policy_name == "openpi":
                         action_chunk = self.policy.infer(obs)
@@ -489,37 +464,37 @@ class PiZeroTeleop:
                         self._maybe_reload_policy()
                         # The packet is processed BEFORE the policy acts so the
                         # same state produces both the intervention label and
-                        # the encoder observation for that transition. The
-                        # detection is policy-type agnostic; the loaded encoder
-                        # decides only what `obs_enc` contains.
+                        # the encoder observation for that transition.
                         intervened = self._detect_intervention(state_dict)
-                        action_wrench, action_norm, obs_enc = self.policy.act(obs)
+                        action_delta_jp, action_norm, obs_enc = self.policy.act(obs)
                         if intervened:
-                            # Human takeover: record the human correction (the
-                            # DAgger target) but do NOT command it back — the
-                            # operator is physically in control, and echoing
-                            # their realized motion as a wrench would push in
-                            # the same direction. The robot side holds/teleops
-                            # while the takeover is active.
-                            action_wrench = self._intervention_action(state_dict)
-                            action_norm = np.clip(action_wrench / ACTION_SCALE, -1.0, 1.0)
+                            # Human takeover: record the realized correction but
+                            # do NOT send it back; the operator is in control.
+                            action_delta_jp = self._intervention_action(state_dict)
+                            action_norm = np.clip(
+                                action_delta_jp / ACTION_SCALE, -1.0, 1.0
+                            )
                         else:
                             self.follower_sender.send_action_chunk(
-                                np.tile(action_wrench[None], (self.action_horizon, 1))
+                                np.tile(
+                                    action_delta_jp[None],
+                                    (self.action_horizon, 1),
+                                )
                             )
                         if self.transition_recorder is not None:
-                            self.transition_recorder.add_step(obs_enc, action_norm, intervened=intervened)
+                            self.transition_recorder.add_step(
+                                obs_enc,
+                                action_norm,
+                                intervened=intervened,
+                            )
 
                 # Keep the last packet for the next step's intervention delta.
                 self._prev_state_dict = state_dict
 
-                # sleep, accounting for the time the loop already took to try and keep the desired frequency
-                elapsed_time = time.time() - loop_start_time
-                sleep_time = max(0.0, loop_delay - elapsed_time)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+                precise_wait(t_cycle_end)
+                iter_idx += 1
 
-        except Exception as e:
+        except Exception:
             import traceback
 
             print("CRASHED WITH ERROR:")

@@ -6,8 +6,7 @@ Three observation encoders are selectable through one config field:
                 go through the agent's own ResNet-10 (``serl_launcher``).
     rltoken  -- the frozen VLA's RL token (``openpi.models.rl_token``) plus
                 proprio, produced outside the agent (``WamRltokenEncoder``).
-    timm     -- a frozen torch/timm vision encoder plus force/proprio, in the
-                spirit of cr-dagger's ``TimmObsEncoderWithForce``
+    timm     -- a frozen torch/timm vision encoder plus proprio
                 (``WamTimmEncoder``).
 
 For ``rltoken`` and ``timm`` the feature extractor runs outside the JAX agent,
@@ -28,11 +27,10 @@ from serl_launcher.utils.launcher import make_agent
 
 ENCODER_KINDS = ("hilserl", "rltoken", "timm")
 
-# WAM proprio fed to every encoder/agent. Matches the fields the UDP packet
-# carries and the 8-dim VLA state used by OpenPIPolicy:
-#   cart_pos(3) + rotvec(3) + gripper_open + gripper_closed + joint_vel(7) + gripper_vel(1)
-WAM_PROPRIO_DIM = 16
-WAM_FORCE_DIM = 7  # follower_ext_torque, used by the timm encoder
+# WAM proprio fed to every encoder/agent:
+#   follower_jp(7) + discrete gripper position(1)
+# This mirrors the simulator's compact state and the 8-dim WAM joint state.
+WAM_PROPRIO_DIM = 8
 
 
 @dataclasses.dataclass
@@ -47,9 +45,8 @@ class EncoderConfig:
     # hilserl
     hilserl_encoder_type: str = "resnet-pretrained"
 
-    # Observation shape. The WAM defaults are 16-dim proprio and 224x224
-    # frames; the LIBERO simulator uses 8-dim (or 17 with velocities) and
-    # 128x128, so both are config-selectable rather than hardcoded.
+    # Observation shape. The WAM defaults match the tested simulator:
+    # 8-dim proprio (joint positions + discrete gripper) and 128x128 frames.
     #
     # ``proprio_dim`` is the TOTAL state width. When a base policy is used,
     # ``base_action_dim`` values are appended to the raw WAM proprio (or are
@@ -57,7 +54,7 @@ class EncoderConfig:
     #   proprio_dim == WAM_PROPRIO_DIM + base_action_dim
     proprio_dim: int = WAM_PROPRIO_DIM
     base_action_dim: int = 0
-    image_size: tuple[int, int] = (224, 224)
+    image_size: tuple[int, int] = (128, 128)
 
     # rltoken
     rlt_config_name: str = "rlt_wam_pi05"
@@ -110,7 +107,7 @@ def observation_dim(cfg: EncoderConfig) -> int:
     if cfg.kind == "rltoken":
         return rltoken_dim(cfg) + cfg.proprio_dim
     if cfg.kind == "timm":
-        return len(cfg.image_keys) * timm_num_features(cfg) + WAM_FORCE_DIM + cfg.proprio_dim
+        return len(cfg.image_keys) * timm_num_features(cfg) + cfg.proprio_dim
     return cfg.proprio_dim
 
 
@@ -135,7 +132,7 @@ def sample_obs(cfg: EncoderConfig, image_size: tuple[int, int] | None = None) ->
     return {"state": np.zeros((observation_dim(cfg),), np.float32)}
 
 
-def action_space(action_dim: int = 7) -> gym.spaces.Box:
+def action_space(action_dim: int = 8) -> gym.spaces.Box:
     return gym.spaces.Box(-1.0, 1.0, (action_dim,), np.float32)
 
 
@@ -143,11 +140,11 @@ def make_encoder_agent(
     algorithm: str,
     cfg: EncoderConfig,
     seed: int,
-    action_dim: int = 7,
+    action_dim: int = 8,
     *,
     reward_bias: float = 0.0,
     target_entropy: float | None = None,
-    discount: float = 0.97,
+    discount: float = 0.985,
     soft_target_update_rate: float = 0.005,
     target_intervention_rate: float = 0.05,
 ):
@@ -176,7 +173,7 @@ def make_encoder_agent(
     )
 
 
-def make_encoder_buffer(cfg: EncoderConfig, capacity: int, action_dim: int = 7):
+def make_encoder_buffer(cfg: EncoderConfig, capacity: int, action_dim: int = 8):
     space = observation_space(cfg)
     act_space = action_space(action_dim)
     if cfg.kind == "hilserl":
@@ -186,8 +183,7 @@ def make_encoder_buffer(cfg: EncoderConfig, capacity: int, action_dim: int = 7):
             capacity,
             image_keys=cfg.image_keys,
             include_grasp_penalty=True,
-            include_active=True,
         )
     return ReplayBufferDataStore(
-        space, act_space, capacity, include_grasp_penalty=True, include_active=True
+        space, act_space, capacity, include_grasp_penalty=True
     )

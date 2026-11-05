@@ -216,6 +216,11 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         return next_actions, next_actions_log_probs
 
+    def _greedy_grasp_actions(self, observations, rng):
+        """Gripper actions for the cost critic, in the env's {-1, 0, 1} space."""
+        grasp_qs = self.forward_grasp_critic(observations, rng=rng)
+        return (grasp_qs.argmax(axis=-1) - 1).astype(jnp.float32)[..., None]
+
     def critic_loss_fn(self, batch, params: Params, rng: PRNGKey):
         """classes that inherit this class can change this function"""
         batch_size = batch["rewards"].shape[0]
@@ -305,10 +310,26 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         target_next_grasp_q = target_next_grasp_qs[jnp.arange(batch_size), best_next_grasp_action]
         chex.assert_shape(target_next_grasp_q, (batch_size,))
 
-        # Compute target Q-values
+        # Compute target Q-values. Subtract the intervention cost so the
+        # gripper Q values prefer actions that avoid human takeovers. Demo
+        # rows are human corrections, not policy behavior, so mask the cost.
+        online_mask = batch.get(
+            "online_mask", jnp.ones((batch_size,), dtype=jnp.float32)
+        )
+        mask_sum = jnp.maximum(online_mask.sum(), 1.0)
+        intervention_multiplier = self.forward_intervention()
+        cost_qs = self.forward_cost_critic(
+            batch["observations"],
+            batch["actions"],
+            rng=rng,
+        )
+        cost_q = jnp.maximum(cost_qs.max(axis=0), 0.0)
+        # Match the actor's rate penalty: (1 - discount) * cost-to-go.
+        cost_rate = (1.0 - self.config["discount"]) * cost_q
         grasp_rewards = batch["rewards"] + batch["grasp_penalty"]
         target_grasp_q = (
             grasp_rewards
+            - intervention_multiplier * online_mask * cost_rate
             + self.config["discount"] * batch["masks"] * target_next_grasp_q
         )
         chex.assert_shape(target_grasp_q, (batch_size,))
@@ -334,6 +355,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             "predicted_grasp_qs": jnp.mean(predicted_grasp_q),
             "target_grasp_qs": jnp.mean(target_grasp_q),
             "grasp_rewards": grasp_rewards.mean(),
+            "intervention_cost_q": jnp.sum(online_mask * cost_q) / mask_sum,
         }
 
         return grasp_critic_loss, info
@@ -341,18 +363,22 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
     def cost_critic_loss_fn(self, batch, params: Params, rng: PRNGKey):
         """Bellman regression for the intervention-cost critic.
 
-        The per-step cost is the ``active`` takeover label. The loss is masked
-        to online transitions because the demo buffer contains only human
-        corrections and would bias the cost estimate upward.
+        The per-step cost is the ``intervened`` takeover label. The loss is
+        masked to online transitions because the demo buffer contains only
+        human corrections and would bias the cost estimate upward.
         """
         batch_size = batch["rewards"].shape[0]
-        actions = batch["actions"][..., :-1]
+        actions = batch["actions"]
         online_mask = batch.get(
             "online_mask", jnp.ones((batch_size,), dtype=jnp.float32)
         )
 
-        rng, next_action_sample_key = jax.random.split(rng)
+        rng, next_action_sample_key, grasp_rng = jax.random.split(rng, 3)
         next_actions, _ = self._compute_next_actions(batch, next_action_sample_key)
+        next_actions = jnp.concatenate(
+            [next_actions, self._greedy_grasp_actions(batch["next_observations"], grasp_rng)],
+            axis=-1,
+        )
 
         target_next_cost_qs = self.forward_target_cost_critic(
             batch["next_observations"], next_actions, rng=rng
@@ -370,7 +396,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
 
         # Conservative cost-to-go; costs are non-negative.
         target_next_cost_q = jnp.maximum(target_next_cost_qs.max(axis=0), 0.0)
-        cost = batch["active"].astype(jnp.float32)
+        cost = batch["intervened"].astype(jnp.float32)
         target_cost_q = (
             cost + self.config["discount"] * batch["masks"] * target_next_cost_q
         )
@@ -409,11 +435,15 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         temperature = self.forward_temperature()
         intervention_multiplier = self.forward_intervention()
 
-        rng, policy_rng, sample_rng, critic_rng, cost_rng = jax.random.split(rng, 5)
+        rng, policy_rng, sample_rng, critic_rng, cost_rng, grasp_rng = jax.random.split(rng, 6)
         action_distributions = self.forward_policy(
             batch["observations"], rng=policy_rng, grad_params=params
         )
         actions, log_probs = action_distributions.sample_and_log_prob(seed=sample_rng)
+        cost_actions = jnp.concatenate(
+            [actions, self._greedy_grasp_actions(batch["observations"], grasp_rng)],
+            axis=-1,
+        )
 
         predicted_qs = self.forward_critic(
             batch["observations"],
@@ -425,7 +455,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         chex.assert_shape(log_probs, (batch_size,))
 
         predicted_cost_qs = self.forward_cost_critic(
-            batch["observations"], actions, rng=cost_rng
+            batch["observations"], cost_actions, rng=cost_rng
         )
         predicted_cost_q = jnp.maximum(predicted_cost_qs.max(axis=0), 0.0)
         chex.assert_shape(predicted_cost_q, (batch_size,))
@@ -676,7 +706,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
             actor=[observations],
             critic=[observations, actions[..., :-1]],
             grasp_critic=[observations],
-            cost_critic=[observations, actions[..., :-1]],
+            cost_critic=[observations, actions],
             temperature=[],
             intervention=[],
         )["params"]

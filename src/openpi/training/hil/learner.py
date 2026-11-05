@@ -46,31 +46,31 @@ class LearnerConfig:
 
     algorithm: str = "rlpd"
     seed: int = 42
-    action_dim: int = 7
+    action_dim: int = 8
 
     # Base policy metadata. ``encoder.proprio_dim`` already includes
     # ``base_action_dim`` when the actor appends a base action to proprio.
     base_policy: str = "none"
     base_action_dim: int = 0
 
-    # Defaults mirror hil-serl's DefaultTrainingConfig.
+    # Defaults mirror the tested LIBERO trainer.
     batch_size: int = 256
-    cta_ratio: int = 2
-    discount: float = 0.97
+    cta_ratio: int = 5
+    discount: float = 0.985
     soft_target_update_rate: float = 0.005
     reward_bias: float = 0.0
     target_entropy: float | None = None
     target_intervention_rate: float = 0.05
     intervention_window: int = 20
 
-    training_starts: int = 100
+    training_starts: int = 20
     max_steps: int = 100_000
-    replay_buffer_capacity: int = 200_000
-    pretrain_steps: int = 20_000
+    replay_buffer_capacity: int = 100_000
+    pretrain_steps: int = 2_000
     poll_interval: float = 5.0
 
     log_interval: int = 100
-    checkpoint_period: int = 5_000
+    checkpoint_period: int = 1_000
     keep: int = 20
 
     def __post_init__(self):
@@ -176,23 +176,23 @@ class InterventionRateTracker:
         )
         self._lock = threading.Lock()
 
-    def add_episode(self, active_steps: int, total_steps: int) -> None:
+    def add_episode(self, intervened_steps: int, total_steps: int) -> None:
         if total_steps <= 0:
             return
         with self._lock:
-            self._episodes.append((active_steps, total_steps))
+            self._episodes.append((intervened_steps, total_steps))
 
     def add_episodes(self, episodes: list[tuple[int, int]]) -> None:
-        for active_steps, total_steps in episodes:
-            self.add_episode(active_steps, total_steps)
+        for intervened_steps, total_steps in episodes:
+            self.add_episode(intervened_steps, total_steps)
 
     @property
     def rate(self) -> float:
         with self._lock:
             episodes = list(self._episodes)
         total_steps = sum(total for _, total in episodes)
-        active_steps = sum(active for active, _ in episodes)
-        return active_steps / max(total_steps, 1)
+        intervened_steps = sum(intervened for intervened, _ in episodes)
+        return intervened_steps / max(total_steps, 1)
 
     @property
     def num_episodes(self) -> int:
@@ -209,7 +209,12 @@ def _sync(cfg: LearnerConfig, seen: set[str], online, demo) -> tuple[int, list[t
             Path(cfg.data_dir) / "online", seen, online
         )
         added += n
-    n, _ = _transitions.sync_transitions(Path(cfg.data_dir) / "demo", seen, demo)
+    n, _ = _transitions.sync_transitions(
+        Path(cfg.data_dir) / "demo",
+        seen,
+        demo,
+        force_episode_start=True,
+    )
     added += n
     return added, episodes
 

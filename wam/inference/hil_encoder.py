@@ -6,7 +6,7 @@ where ``observation`` is exactly what the SAC/BC agent expects:
     WamHilserlEncoder  -> {"front_image": (1,H,W,C), "wrist_image": (...),
                            "state": (1, PROPRIO)}
     WamRltokenEncoder  -> {"state": (z_rl + PROPRIO,)}
-    WamTimmEncoder     -> {"state": (timm_feat + FORCE + PROPRIO,)}
+    WamTimmEncoder     -> {"state": (timm_feat + PROPRIO,)}
 
 The first one owns no network: its images go straight into the agent's
 ResNet-10, exactly as in hil-serl. The other two are frozen feature extractors
@@ -16,21 +16,36 @@ training loop for all three options).
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
 import numpy as np
 
-from openpi.training.hil.encoders import WAM_FORCE_DIM
 from openpi.training.hil.encoders import WAM_PROPRIO_DIM
 from openpi.training.hil.encoders import EncoderConfig
-from wam.inference.openpi_policy import WAM_TORQUE_LIMIT
 from wam.inference.openpi_policy import quat_to_rotvec
 
 logger = logging.getLogger(__name__)
 
 # Keep in sync with the pi05 data pipeline's 8-dim state (see OpenPIPolicy).
 VLA_GRIPPER_STATE = np.array([0.015, -0.015], np.float32)
+
+# The base policy sends absolute joint positions. Normalize them with the
+# same joint statistics the VLA state uses before appending them to proprio.
+_JP_NORM_PATH = Path(__file__).resolve().parents[1] / "config/wam/norm_stats.json"
+_JP_STATE = json.loads(_JP_NORM_PATH.read_text())["norm_stats"]["state"]
+JP_MEAN = np.asarray(_JP_STATE["mean"][:7], np.float32)
+JP_STD = np.asarray(_JP_STATE["std"][:7], np.float32)
+
+
+def discrete_gripper(value: float) -> float:
+    """Map a gripper position to the hybrid agent's {-1, 0, 1} action space."""
+    if value > 0.5:
+        return 1.0
+    if value < -0.5:
+        return -1.0
+    return 0.0
 
 
 def vla_state(low_dim: dict) -> np.ndarray:
@@ -45,28 +60,23 @@ def vla_state(low_dim: dict) -> np.ndarray:
 
 
 def wam_proprio(low_dim: dict, base_action: np.ndarray | None = None) -> np.ndarray:
-    """16-dim RL proprio shared by all three WAM encoders.
+    """8-dim RL proprio shared by all three WAM encoders.
 
-    When a base policy is active, its next action (``policy_jp``) is appended,
-    making the state ``WAM_PROPRIO_DIM + base_action_dim`` wide.
+    The real-robot state is follower joint positions plus a discrete gripper
+    position. When a base policy is active, its normalized absolute joint
+    action (``policy_jp``) is appended, making the state
+    ``WAM_PROPRIO_DIM + base_action_dim`` wide.
     """
-    gripper = float(low_dim.get("gripper_pos", 0.0))
-    jv = np.asarray(low_dim.get("follower_jv", np.zeros(7)), np.float32)
-    gv = np.asarray([low_dim.get("gripper_vel", 0.0)], np.float32)
-    parts = [
-        np.asarray(low_dim["follower_cart_pos"], np.float32),
-        quat_to_rotvec(np.asarray(low_dim["follower_cart_rot"], np.float32)),
-        np.asarray([gripper, -gripper], np.float32),
-        jv,
-        gv,
-    ]
+    jp = np.asarray(low_dim["follower_jp"], np.float32)
+    gripper = discrete_gripper(float(low_dim.get("gripper_pos", 0.0)))
+    parts = [jp, np.asarray([gripper], np.float32)]
     if base_action is not None:
         parts.append(np.asarray(base_action, np.float32).reshape(-1))
     return np.concatenate(parts).astype(np.float32)
 
 
 def _base_action_from_low_dim(cfg: EncoderConfig, low_dim: dict) -> np.ndarray | None:
-    """Read the base policy's delta joint action from the extended UDP packet."""
+    """Read and normalize the base policy's absolute joint positions."""
     if cfg.base_action_dim <= 0:
         return None
     if "policy_jp" not in low_dim:
@@ -79,13 +89,9 @@ def _base_action_from_low_dim(cfg: EncoderConfig, low_dim: dict) -> np.ndarray |
         raise ValueError(
             f"policy_jp has {action.shape[0]} dims, expected encoder.base_action_dim={cfg.base_action_dim}"
         )
+    if action.shape[0] == JP_MEAN.shape[0]:
+        action = (action - JP_MEAN) / JP_STD
     return action
-
-
-def wam_force(low_dim: dict) -> np.ndarray:
-    """7-dim measured external torque, used only by the timm encoder."""
-    force = np.asarray(low_dim.get("follower_ext_torque", np.zeros(WAM_FORCE_DIM)), np.float32)
-    return force / float(WAM_TORQUE_LIMIT)
 
 
 def _require_wam_proprio(cfg: EncoderConfig) -> None:
@@ -108,7 +114,7 @@ def _require_wam_proprio(cfg: EncoderConfig) -> None:
 class WamHilserlEncoder:
     """Raw images + proprio for the agent's own ResNet-10."""
 
-    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (224, 224)):
+    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
         _require_wam_proprio(cfg)
         self.cfg = cfg
         self.image_size = image_size
@@ -131,7 +137,7 @@ class WamRltokenEncoder:
     the action denoising loop is skipped because only ``z_rl`` is needed here.
     """
 
-    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (224, 224)):
+    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
         _require_wam_proprio(cfg)
         if not cfg.rlt_checkpoint_dir:
             raise ValueError("encoder.kind='rltoken' needs --encoder.rlt_checkpoint_dir")
@@ -223,15 +229,15 @@ class WamRltokenEncoder:
 
 
 class WamTimmEncoder:
-    """Frozen torch/timm vision encoder + force/proprio.
+    """Frozen torch/timm vision encoder + proprio.
 
-    Close to cr-dagger's ``TimmObsEncoderWithForce``: one timm model per RGB
-    key, the measured force vector, and proprio fused by concatenation. It is
+    One timm model per RGB key, with proprio fused by concatenation. It is
     deliberately frozen (no torch backward path), so the JAX SAC/BC agents see
-    a fixed feature vector. ``fuse_mode='concat'`` is the cr-dagger default.
+    a fixed feature vector. Torque is intentionally not part of the real input
+    for now.
     """
 
-    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (224, 224)):
+    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
         _require_wam_proprio(cfg)
         import timm
         import torch
@@ -263,13 +269,12 @@ class WamTimmEncoder:
 
     def encode(self, raw_obs: dict) -> dict:
         parts = [self._features(np.asarray(raw_obs[key])) for key in self.cfg.image_keys]
-        parts.append(wam_force(raw_obs["low_dim"]))
         base_action = _base_action_from_low_dim(self.cfg, raw_obs["low_dim"])
         parts.append(wam_proprio(raw_obs["low_dim"], base_action))
         return {"state": np.concatenate(parts).astype(np.float32)}
 
 
-def make_encoder(cfg: EncoderConfig, image_size: tuple[int, int] = (224, 224)):
+def make_encoder(cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
     if cfg.kind == "hilserl":
         return WamHilserlEncoder(cfg, image_size)
     if cfg.kind == "rltoken":

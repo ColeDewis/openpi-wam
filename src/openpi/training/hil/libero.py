@@ -497,18 +497,18 @@ class GamepadOperator:
         dz = self.deadzone
         return np.where(mag < dz, 0.0, np.sign(v) * (mag - dz) / (1.0 - dz)).astype(np.float32)
 
-    def takeover(self) -> tuple[bool, bool, np.ndarray]:
-        """``(active, moving, cmd)``.
+    def takeover(self) -> tuple[bool, np.ndarray]:
+        """``(intervened, cmd)``.
 
-        ``active``: the human owns the robot, so do not query the policy.
-        ``moving``: the human is commanding something this frame (demo-worthy).
+        ``intervened``: the human owns the robot from the first input until
+        handback (PS release or ``handback_s`` without input).
         ``cmd``: ``[x, y, z, roll, pitch, yaw, gripper]``.
         """
         zeros = np.zeros(7, np.float32)
         now = time.monotonic()
         with self._lock:
             if now - self._last_msg >= self.stale_s:
-                return self._latched, False, zeros
+                return self._latched, zeros
             lx, ly, rx, ry = self._shape(self._axes.copy())
             b = self._buttons.copy()
             cmd = np.array(
@@ -534,7 +534,7 @@ class GamepadOperator:
                     self._wait_idle = True
             if self._wait_idle:
                 if moving:
-                    return False, False, zeros  # still holding input after hand-back: policy runs
+                    return False, zeros  # still holding input after hand-back: policy runs
                 self._wait_idle = False
             if moving:
                 self._latched = True
@@ -543,7 +543,7 @@ class GamepadOperator:
                 self._latched = False
 
             full = np.concatenate([cmd * self.takeover_step, [grip]]).astype(np.float32)
-            return self._latched, moving, full
+            return self._latched, full
 
 
 # ---------------------------------------------------------------------------
@@ -1283,11 +1283,10 @@ class HilLiberoTrainer:
             demo = load_demo(path)
             if not demo.transitions:
                 continue
-            # Demos recorded before the intervention-cost work lack ``active``
-            # (and possibly ``grasp_penalty``); default them so the buffers can
-            # accept the transitions.
+            # Demos recorded before the intervention-cost work may carry the
+            # old ``active`` field; the buffer only accepts ``intervened``.
             for transition in demo.transitions:
-                transition.setdefault("active", transition.get("intervened", False))
+                transition.pop("active", None)
                 transition.setdefault("grasp_penalty", 0.0)
             self._validate_demo_dims(demo.transitions, str(path))
 
@@ -1440,7 +1439,7 @@ class HilLiberoTrainer:
                     open_section = None
                     self._recording_open = None
 
-            active, moving, command = self.operator.takeover()
+            intervened, command = self.operator.takeover()
             final_action = command if cfg.rotation else command[[0, 1, 2, 6]]
             final_action = np.asarray(final_action, np.float32)
             final_action[-1] = _discretize_gripper(float(final_action[-1]))
@@ -1468,12 +1467,12 @@ class HilLiberoTrainer:
                     "observations": obs_enc,
                     "actions": final_action,
                     "next_observations": next_enc,
-                    "intervened": moving,
+                    "intervened": intervened,
                     "grasp_penalty": penalty,
                 }
             )
             obs_enc = next_enc
-            self._show(state.obs, self._teleop_base_hud, _ORANGE if active else _GREEN)
+            self._show(state.obs, self._teleop_base_hud, _ORANGE if intervened else _GREEN)
             if state.done:
                 break
             time.sleep(1.0 / max(cfg.control_hz, 1e-6))
@@ -1506,7 +1505,6 @@ class HilLiberoTrainer:
                 reward=reward,
                 done=last,
                 intervened=step["intervened"],
-                active=step.get("active", step["intervened"]),
                 grasp_penalty=step["grasp_penalty"],
             )
             out.append(transition)
@@ -1645,17 +1643,15 @@ class HilLiberoTrainer:
 
             step_start = time.monotonic()
             if train:
-                active, moving, command = self.operator.takeover()
+                intervened, command = self.operator.takeover()
             else:
-                active, moving, command = False, False, None
+                intervened, command = False, None
 
-            if active:
+            if intervened:
                 final_action = command if cfg.rotation else command[[0, 1, 2, 6]]
                 final_action = np.asarray(final_action, np.float32)
-                intervened = moving
             elif not residual_active:
                 final_action = np.asarray(base_action, np.float32)
-                intervened = False
             else:
                 agent = self.actor_agent if train else self.agent
                 residual = np.array(agent.sample_actions(obs_enc, seed=self._next_key(), argmax=not train), np.float32)
@@ -1664,7 +1660,6 @@ class HilLiberoTrainer:
                     if base_action is None
                     else combine_base_residual(base_action, residual, max_residual=cfg.residual_max)
                 )
-                intervened = False
 
             final_action = np.asarray(final_action, np.float32)
             final_action[-1] = _discretize_gripper(float(final_action[-1]))
@@ -1672,7 +1667,7 @@ class HilLiberoTrainer:
             penalty = cfg.grasp_penalty if gripper not in (0.0, grip) else 0.0
             if gripper != 0.0:
                 grip = gripper
-            if cfg.algorithm == "hgdagger" and (active or residual_active):
+            if cfg.algorithm == "hgdagger" and (intervened or residual_active):
                 final_action[-1] = grip
             residual_action = final_action.copy() if base_action is None else residual_target(final_action, base_action)
 
@@ -1703,15 +1698,18 @@ class HilLiberoTrainer:
                         "actions": residual_action,
                         "next_observations": next_enc,
                         "intervened": intervened,
-                        "active": active,
                         "grasp_penalty": penalty,
                     }
                 )
             obs_enc, base_action, residual_active = next_enc, next_base_action, next_residual_active
             step_idx += 1
 
-            self._mode = "HUMAN" if active else ("TRAIN" if train else "EVAL")
-            self._show(state.obs, self._label(active=active), _ORANGE if active else _GREEN)
+            self._mode = "HUMAN" if intervened else ("TRAIN" if train else "EVAL")
+            self._show(
+                state.obs,
+                self._label(intervened=intervened),
+                _ORANGE if intervened else _GREEN,
+            )
             if not train:
                 frames.append(self.obs_adapter.display(obs))
 
@@ -1767,26 +1765,27 @@ class HilLiberoTrainer:
 
         demo_steps = 0
         for segment in demo_segments:
-            self.demo.force_episode_start()
+            if hasattr(self.demo, "force_episode_start"):
+                self.demo.force_episode_start()
             for transition in segment:
                 self.demo.insert(transition)
             demo_steps += len(segment)
         if demo_steps:
             self._demo_episodes += 1
-        active_steps, total_steps = episode_stats(transitions)
-        self.intervention_tracker.add_episode(active_steps, total_steps)
+        intervened_steps, total_steps = episode_stats(transitions)
+        self.intervention_tracker.add_episode(intervened_steps, total_steps)
         intervention_segments = 0
-        prev_active = False
+        prev_intervened = False
         for transition in transitions:
-            active = bool(transition.get("active", False))
-            if active and not prev_active:
+            intervened = bool(transition["intervened"])
+            if intervened and not prev_intervened:
                 intervention_segments += 1
-            prev_active = active
-        self._intervention_steps += active_steps
+            prev_intervened = intervened
+        self._intervention_steps += intervened_steps
         self._save_stats()
         print(
             f"[flush] online={len(transitions)} demo={demo_steps} "
-            f"active={active_steps} rate={active_steps / total_steps:.3f} "
+            f"intervened={intervened_steps} rate={intervened_steps / total_steps:.3f} "
             f"avg_rate={self.intervention_tracker.rate:.3f} "
             f"segments={intervention_segments} success={success} "
             f"online_episodes={self._online_episodes} demo_episodes={self._demo_episodes}"
@@ -1840,8 +1839,8 @@ class HilLiberoTrainer:
         env_action[6] = grip
         return env_action
 
-    def _label(self, *, active: bool) -> str:
-        mode = "HUMAN" if active else "POLICY"
+    def _label(self, *, intervened: bool) -> str:
+        mode = "HUMAN" if intervened else "POLICY"
         bottleneck = ""
         if self.bottleneck_mode:
             idx = self._episode_train_idx if self._episode_is_train else self._episode_eval_idx
