@@ -17,15 +17,11 @@ from wam.inference.hil_policy import HilPolicy
 from wam.inference.openpi_policy import OpenPIPolicy
 from wam.inference.recorder_receiver import RecorderReceiver
 from wam.inference.udp_handler import TeleopUDPHandler
+from wam.inference.inference_utils import precise_wait, preprocess_image
 
 np.set_printoptions(precision=4, suppress=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Editable knobs (kept at the top by request). Everything here is in
-# SCREAMING_SNAKE_CASE so it is easy to find and tune on the robot.
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── intervention detection (from the UDP packet) ─────────────────────────────
+# ── intervention detection 
 # The controller reports a per-joint policy torque scale. A human takeover is
 # any scale above this threshold; tune it on the robot.
 INTERVENTION_POLICY_TORQUE_SCALE_THRESHOLD = 0.5
@@ -45,53 +41,12 @@ HIL_POLICY_RELOAD_INTERVAL_S = 30.0  # pick up new learner checkpoints
 MAX_STATE_IMAGE_DT_NS = 100_000_000  # 100 ms state/image alignment tolerance
 
 
-def precise_sleep(dt: float, slack_time: float = 0.001, time_func=time.monotonic):
-    """Sleep most of ``dt``, then spin for the remainder to reduce jitter."""
-    t_start = time_func()
-    if dt > slack_time:
-        time.sleep(dt - slack_time)
-    t_end = t_start + dt
-    while time_func() < t_end:
-        pass
-
-
-def precise_wait(t_end: float, slack_time: float = 0.001, time_func=time.monotonic):
-    """Wait until ``t_end`` using a hybrid sleep/spin."""
-    t_start = time_func()
-    t_wait = t_end - t_start
-    if t_wait > 0:
-        t_sleep = t_wait - slack_time
-        if t_sleep > 0:
-            time.sleep(t_sleep)
-        while time_func() < t_end:
-            pass
-
-
-def preprocess_image(img_bgr: np.ndarray, out_size=(128, 128)) -> np.ndarray:
-    """Resize with padding, matching the simulator's ``resize_with_pad``.
-
-    OpenCV on the CPU is faster than a torch GPU resize for these small frames:
-    it avoids the host-to-device copy, kernel launch, and device-to-host copy.
-    """
-    h, w = img_bgr.shape[:2]
-    target_h, target_w = out_size
-    ratio = max(w / target_w, h / target_h)
-    new_h = int(h / ratio)
-    new_w = int(w / ratio)
-    resized = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    canvas = np.zeros((target_h, target_w, 3), np.uint8)
-    pad_h = (target_h - new_h) // 2
-    pad_w = (target_w - new_w) // 2
-    canvas[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
-    return canvas
-
-
 class PiZeroTeleop:
     def __init__(
         self,
         remote_ip: str,
-        send_port: int,
+        follower_send_port: int,
+        leader_send_port: int,
         recv_port: int,
         dof: int,
         wrist_cam_serial: str,
@@ -99,7 +54,7 @@ class PiZeroTeleop:
         checkpoint_path: str,
         model_config: str,
         action_horizon: int = 5,
-        loop_hz: int = 30,
+        loop_hz: int = 10,
         display_scale: int = 3,
         debug: bool = False,
         offline: bool = False,
@@ -118,7 +73,6 @@ class PiZeroTeleop:
         self.loop_hz = loop_hz
         self.dt = 1.0 / self.loop_hz
         self.policy_name = policy
-        self.image_size = (224, 224)
         self.action_size = 7 if policy == "openpi" else ACTION_DIM
         # The hil policies are deployed from a trained checkpoint, which implies
         # inference even when --infer is omitted.
@@ -127,7 +81,8 @@ class PiZeroTeleop:
 
         # UDP Configuration
         self.remote_ip = remote_ip
-        self.send_port = send_port
+        self.follower_send_port = follower_send_port
+        self.leader_send_port = leader_send_port
         self.recv_port = recv_port
         self.DOF = dof
 
@@ -136,10 +91,17 @@ class PiZeroTeleop:
         self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
         self.follower_sender = TeleopUDPHandler(
             self.remote_ip,
-            self.send_port,
+            self.follower_send_port,
             DOF=self.DOF,
             action_size=self.action_size,
         )
+        self.leader_sender = TeleopUDPHandler(
+            self.remote_ip,
+            self.leader_send_port,
+            DOF=self.DOF,
+            action_size=self.action_size,
+        )
+
 
         # FLIR setup
         camera_configs = {
@@ -162,14 +124,16 @@ class PiZeroTeleop:
                         f"--policy {policy} but {hil_checkpoint}/config.json was trained with "
                         f"encoder kind {self.policy.encoder_config.kind!r}"
                     )
-                self.image_size = self.policy.image_size
-                cprint(
-                    f"[HIL] {self.policy.algorithm} policy loaded from {hil_checkpoint} "
-                    f"(encoder={policy}, image_size={self.image_size})",
-                    "green",
-                )
             else:
                 raise ValueError(f"unknown policy {policy!r}")
+
+        self.image_size = self.policy.image_size
+
+        cprint(
+            f"[HIL] {policy} loaded from {hil_checkpoint} "
+            f"(image_size={self.image_size})",
+            "green",
+        )
 
         # Online transition collection (RLPD: online+demo, HG-Dagger: demo only).
         # The recorder reads the algorithm from the loaded policy checkpoint.
@@ -198,7 +162,7 @@ class PiZeroTeleop:
 
         cprint("Initialization complete. Running teleop loop...", "green")
         cprint(
-            "Joystick Controls: OPTIONS ('o') Start/Pause/Save | SHARE ('x') Discard",
+            "Joystick Controls: OPTIONS ('o') Start/Pause/mark success | SHARE ('x') mark fail",
             "cyan",
         )
 
@@ -246,7 +210,7 @@ class PiZeroTeleop:
         elif self.loop_state == "RECORDING":
             self.loop_state = "PENDING"
             cprint("\n[RECORDER] EPISODE PAUSED", "yellow")
-            cprint("Press OPTIONS ('o') to Save, SHARE ('x') to Discard.", "cyan")
+            cprint("Press OPTIONS ('o') to mark success, SHARE ('x') to mark fail.", "cyan")
         elif self.loop_state == "PENDING":
             self._save_episode()
 
@@ -468,18 +432,11 @@ class PiZeroTeleop:
                         intervened = self._detect_intervention(state_dict)
                         action_delta_jp, action_norm, obs_enc = self.policy.act(obs)
                         if intervened:
-                            # Human takeover: record the realized correction but
+                            # the intervention is the action we want to record
                             # do NOT send it back; the operator is in control.
                             action_delta_jp = self._intervention_action(state_dict)
                             action_norm = np.clip(
                                 action_delta_jp / ACTION_SCALE, -1.0, 1.0
-                            )
-                        else:
-                            self.follower_sender.send_action_chunk(
-                                np.tile(
-                                    action_delta_jp[None],
-                                    (self.action_horizon, 1),
-                                )
                             )
                         if self.transition_recorder is not None:
                             self.transition_recorder.add_step(
@@ -487,6 +444,20 @@ class PiZeroTeleop:
                                 action_norm,
                                 intervened=intervened,
                             )
+
+                        self.follower_sender.send_action_chunk(
+                            np.tile(
+                                action_delta_jp[None],
+                                (self.action_horizon, 1),
+                            )
+                        )
+                        self.leader_sender.send_action_chunk(
+                            np.tile(
+                                action_delta_jp[None],
+                                (self.action_horizon, 1),
+                            )
+                        )
+
 
                 # Keep the last packet for the next step's intervention delta.
                 self._prev_state_dict = state_dict

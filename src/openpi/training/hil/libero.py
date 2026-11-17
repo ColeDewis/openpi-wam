@@ -77,7 +77,6 @@ _MAX_STEPS = {
     "libero_spatial": 220,
     "libero_object": 280,
     "libero_goal": 600,
-    # "libero_goal": 30000,
     "libero_10": 520,
     "libero_90": 400,
 }
