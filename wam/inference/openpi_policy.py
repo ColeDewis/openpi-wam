@@ -81,6 +81,8 @@ class OpenPIPolicy:
             return
 
         self.DOF = dof
+        self.image_size = (224, 224)
+
         self.checkpoint_path = checkpoint_path
         self.config = _config.get_config(model_config)
         wam_assets = _config.AssetsConfig(
@@ -103,10 +105,10 @@ class OpenPIPolicy:
         if cfg_type == "droid":
             example = {
                 "observation/exterior_image_1_left": np.random.randint(
-                    256, size=(224, 224, 3), dtype=np.uint8
+                    256, size=(*self.image_size, 3), dtype=np.uint8
                 ),
                 "observation/wrist_image_left": np.random.randint(
-                    256, size=(224, 224, 3), dtype=np.uint8
+                    256, size=(*self.image_size, 3), dtype=np.uint8
                 ),
                 "observation/joint_position": np.random.rand(7),
                 "observation/gripper_position": np.random.rand(1),
@@ -116,10 +118,10 @@ class OpenPIPolicy:
         elif cfg_type == "libero":
             example = {
                 "observation/image": np.random.randint(
-                    256, size=(224, 224, 3), dtype=np.uint8
+                    256, size=(*self.image_size, 3), dtype=np.uint8
                 ),
                 "observation/wrist_image": np.random.randint(
-                    256, size=(224, 224, 3), dtype=np.uint8
+                    256, size=(*self.image_size, 3), dtype=np.uint8
                 ),
                 "observation/state": np.random.rand(8),
                 "prompt": "do something",

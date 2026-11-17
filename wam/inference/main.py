@@ -45,7 +45,8 @@ class PiZeroTeleop:
     def __init__(
         self,
         remote_ip: str,
-        send_port: int,
+        follower_send_port: int,
+        leader_send_port: int,
         recv_port: int,
         dof: int,
         wrist_cam_serial: str,
@@ -72,7 +73,6 @@ class PiZeroTeleop:
         self.loop_hz = loop_hz
         self.dt = 1.0 / self.loop_hz
         self.policy_name = policy
-        self.image_size = (224, 224)
         self.action_size = 7 if policy == "openpi" else ACTION_DIM
         # The hil policies are deployed from a trained checkpoint, which implies
         # inference even when --infer is omitted.
@@ -81,7 +81,8 @@ class PiZeroTeleop:
 
         # UDP Configuration
         self.remote_ip = remote_ip
-        self.send_port = send_port
+        self.follower_send_port = follower_send_port
+        self.leader_send_port = leader_send_port
         self.recv_port = recv_port
         self.DOF = dof
 
@@ -90,10 +91,17 @@ class PiZeroTeleop:
         self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
         self.follower_sender = TeleopUDPHandler(
             self.remote_ip,
-            self.send_port,
+            self.follower_send_port,
             DOF=self.DOF,
             action_size=self.action_size,
         )
+        self.leader_sender = TeleopUDPHandler(
+            self.remote_ip,
+            self.leader_send_port,
+            DOF=self.DOF,
+            action_size=self.action_size,
+        )
+
 
         # FLIR setup
         camera_configs = {
@@ -116,14 +124,16 @@ class PiZeroTeleop:
                         f"--policy {policy} but {hil_checkpoint}/config.json was trained with "
                         f"encoder kind {self.policy.encoder_config.kind!r}"
                     )
-                self.image_size = self.policy.image_size
-                cprint(
-                    f"[HIL] {self.policy.algorithm} policy loaded from {hil_checkpoint} "
-                    f"(encoder={policy}, image_size={self.image_size})",
-                    "green",
-                )
             else:
                 raise ValueError(f"unknown policy {policy!r}")
+
+        self.image_size = self.policy.image_size
+
+        cprint(
+            f"[HIL] {policy} loaded from {hil_checkpoint} "
+            f"(image_size={self.image_size})",
+            "green",
+        )
 
         # Online transition collection (RLPD: online+demo, HG-Dagger: demo only).
         # The recorder reads the algorithm from the loaded policy checkpoint.
@@ -422,18 +432,11 @@ class PiZeroTeleop:
                         intervened = self._detect_intervention(state_dict)
                         action_delta_jp, action_norm, obs_enc = self.policy.act(obs)
                         if intervened:
-                            # Human takeover: record the realized correction but
+                            # the intervention is the action we want to record
                             # do NOT send it back; the operator is in control.
                             action_delta_jp = self._intervention_action(state_dict)
                             action_norm = np.clip(
                                 action_delta_jp / ACTION_SCALE, -1.0, 1.0
-                            )
-                        else:
-                            self.follower_sender.send_action_chunk(
-                                np.tile(
-                                    action_delta_jp[None],
-                                    (self.action_horizon, 1),
-                                )
                             )
                         if self.transition_recorder is not None:
                             self.transition_recorder.add_step(
@@ -441,6 +444,20 @@ class PiZeroTeleop:
                                 action_norm,
                                 intervened=intervened,
                             )
+
+                        self.follower_sender.send_action_chunk(
+                            np.tile(
+                                action_delta_jp[None],
+                                (self.action_horizon, 1),
+                            )
+                        )
+                        self.leader_sender.send_action_chunk(
+                            np.tile(
+                                action_delta_jp[None],
+                                (self.action_horizon, 1),
+                            )
+                        )
+
 
                 # Keep the last packet for the next step's intervention delta.
                 self._prev_state_dict = state_dict
