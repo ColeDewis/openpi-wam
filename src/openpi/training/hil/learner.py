@@ -46,7 +46,10 @@ class LearnerConfig:
 
     algorithm: str = "rlpd"
     seed: int = 42
-    action_dim: int = 8
+    action_dim: int = 7
+
+    use_gripper: bool = False
+
 
     # Base policy metadata. ``encoder.proprio_dim`` already includes
     # ``base_action_dim`` when the actor appends a base action to proprio.
@@ -115,6 +118,7 @@ def _agent_from_config(cfg: LearnerConfig):
         cfg.encoder,
         cfg.seed,
         cfg.action_dim,
+        use_gripper=cfg.use_gripper,
         reward_bias=cfg.reward_bias,
         target_entropy=cfg.target_entropy,
         discount=cfg.discount,
@@ -127,6 +131,7 @@ def save_run_config(cfg: LearnerConfig) -> None:
     payload = {
         "algorithm": cfg.algorithm,
         "action_dim": cfg.action_dim,
+        "use_gripper": bool(cfg.use_gripper),
         "encoder": dataclasses.asdict(cfg.encoder),
         "base_policy": getattr(cfg, "base_policy", "none"),
         "base_action_dim": getattr(cfg, "base_action_dim", 0),

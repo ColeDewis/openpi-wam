@@ -593,6 +593,9 @@ class SimConfig:
     include_velocity: bool = False
     rotation: bool = False
 
+    use_gripper: bool = False
+
+
     max_episodes: int = 2000
     max_episode_steps: int = 0  # 0 -> the suite's standard limit
     max_env_steps: int = 0  # 0 -> max_episodes * max_episode_steps
@@ -870,6 +873,7 @@ class HilLiberoTrainer:
             cfg.encoder,
             cfg.seed,
             cfg.action_dim,
+            use_gripper=cfg.use_gripper,
             reward_bias=0.0,
             target_entropy=None,
             discount=cfg.discount,

@@ -40,9 +40,10 @@ class HilPolicy:
                 "retrain with a fresh checkpoint directory"
             )
         self.action_dim = int(config["action_dim"])
+        self.use_gripper = bool(config.get("use_gripper", True))
         self.base_policy = config.get("base_policy", "none")
         self.base_action_dim = int(config.get("base_action_dim", 0))
-        self.action_scale = np.asarray(action_scale, np.float32)
+        self.action_scale = np.asarray(action_scale, np.float32)[: self.action_dim] 
         encoder_config = dict(config["encoder"])
         encoder_config["image_keys"] = tuple(encoder_config.get("image_keys", ("front_image", "wrist_image")))
         self.encoder_config = EncoderConfig(**encoder_config)
@@ -52,6 +53,7 @@ class HilPolicy:
             self.encoder_config,
             seed=0,
             action_dim=self.action_dim,
+            use_gripper=self.use_gripper,
         )
         self.agent = self.reload(self.agent)
         self.image_size = tuple(

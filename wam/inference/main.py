@@ -1,3 +1,12 @@
+"""running on the real robot
+
+Example:
+uv run python -m wam.inference.main \
+    --policy hilserl \
+    --hil_checkpoint /home/serg/projects/openpi-wam/checkpoints/hil/test_rlpd \
+    --hil_data_dir /home/serg/projects/openpi-wam/interventions/test \
+    --record
+"""
 import argparse
 import collections
 import os
@@ -73,6 +82,8 @@ class PiZeroTeleop:
         self.loop_hz = loop_hz
         self.dt = 1.0 / self.loop_hz
         self.policy_name = policy
+        self.use_gripper = True
+        self.action_scale = ACTION_SCALE
         self.action_size = 7 if policy == "openpi" else ACTION_DIM
         # The hil policies are deployed from a trained checkpoint, which implies
         # inference even when --infer is omitted.
@@ -110,6 +121,7 @@ class PiZeroTeleop:
         }
         self.camera_manager = MultiFLIRManager(camera_configs)
         self.camera_manager.start_all()
+        self.image_size = (128, 128)
 
 
         # Policy Configuration
@@ -119,21 +131,24 @@ class PiZeroTeleop:
                 self.policy = OpenPIPolicy(checkpoint_path, model_config, "libero", debug=self.debug, dof=self.DOF)
             elif policy in ("hilserl", "rltoken", "timm"):
                 self.policy = HilPolicy(hil_checkpoint, ACTION_SCALE)
+                self.image_size = self.policy.image_size
+                self.use_gripper = self.policy.use_gripper
+                self.action_scale = self.policy.action_scale
+                self.action_size = self.policy.action_dim
+
                 if self.policy.encoder_config.kind != policy:
                     raise ValueError(
                         f"--policy {policy} but {hil_checkpoint}/config.json was trained with "
                         f"encoder kind {self.policy.encoder_config.kind!r}"
                     )
+
+                cprint(
+                    f"[HIL] {policy} loaded from {hil_checkpoint} "
+                    f"(image_size={self.image_size})",
+                    "green",
+                )
             else:
                 raise ValueError(f"unknown policy {policy!r}")
-
-        self.image_size = self.policy.image_size
-
-        cprint(
-            f"[HIL] {policy} loaded from {hil_checkpoint} "
-            f"(image_size={self.image_size})",
-            "green",
-        )
 
         # Online transition collection (RLPD: online+demo, HG-Dagger: demo only).
         # The recorder reads the algorithm from the loaded policy checkpoint.
@@ -276,6 +291,8 @@ class PiZeroTeleop:
         prev_jp = np.asarray(self._prev_state_dict["follower_jp"], np.float32)
         jp = np.asarray(state_dict["follower_jp"], np.float32)
         delta_jp = jp - prev_jp
+        if not self.use_gripper:
+            return delta_jp.astype(np.float32)
         gripper = discrete_gripper(float(state_dict.get("gripper_pos", 0.0)))
         return np.concatenate([delta_jp, [gripper]]).astype(np.float32)
 
@@ -436,7 +453,7 @@ class PiZeroTeleop:
                             # do NOT send it back; the operator is in control.
                             action_delta_jp = self._intervention_action(state_dict)
                             action_norm = np.clip(
-                                action_delta_jp / ACTION_SCALE, -1.0, 1.0
+                                action_delta_jp / self.action_scale, -1.0, 1.0
                             )
                         if self.transition_recorder is not None:
                             self.transition_recorder.add_step(
@@ -480,7 +497,8 @@ if __name__ == "__main__":
 
     # Network config
     parser.add_argument("--ip", type=str, default="127.0.0.1", help="Remote UDP IP")
-    parser.add_argument("--send_port", type=int, default=6666, help="UDP Send Port")
+    parser.add_argument("--leader_send_port", type=int, default=10001, help="UDP Send Port")
+    parser.add_argument("--follower_send_port", type=int, default=20001, help="UDP Send Port")
     parser.add_argument("--recv_port", type=int, default=6554, help="UDP Receive Port")
 
     # Robot config
@@ -560,7 +578,8 @@ if __name__ == "__main__":
 
     teleop = PiZeroTeleop(
         remote_ip=args.ip,
-        send_port=args.send_port,
+        follower_send_port=args.follower_send_port,
+        leader_send_port=args.leader_send_port,
         recv_port=args.recv_port,
         dof=args.dof,
         wrist_cam_serial=args.wrist_cam,

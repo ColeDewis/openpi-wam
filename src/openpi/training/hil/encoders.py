@@ -142,6 +142,7 @@ def make_encoder_agent(
     seed: int,
     action_dim: int = 8,
     *,
+    use_gripper: bool = True,
     reward_bias: float = 0.0,
     target_entropy: float | None = None,
     discount: float = 0.985,
@@ -155,7 +156,7 @@ def make_encoder_agent(
     Every caller that asks for ``"sac"`` (learner, sim, ``HilPolicy``) therefore gets the
     same architecture, so checkpoints restore on both sides.
     """
-    if algorithm == "sac":
+    if algorithm == "sac" and use_gripper:
         algorithm = "sac_hybrid"
     return make_agent(
         algorithm,

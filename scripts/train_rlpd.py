@@ -7,9 +7,9 @@ this is the learner. The latest checkpoint in ``--checkpoint-dir`` is restored
 automatically.
 
 Example:
-    uv run scripts/train_rlpd.py \
-        --data-dir ./interventions/book \
-        --checkpoint-dir ./checkpoints/hil/book_rlpd
+uv run scripts/train_rlpd.py \
+        --data-dir /home/serg/projects/openpi-wam/interventions/test \
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/test_rlpd
 """
 
 from __future__ import annotations
