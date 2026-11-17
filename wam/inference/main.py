@@ -17,15 +17,11 @@ from wam.inference.hil_policy import HilPolicy
 from wam.inference.openpi_policy import OpenPIPolicy
 from wam.inference.recorder_receiver import RecorderReceiver
 from wam.inference.udp_handler import TeleopUDPHandler
+from wam.inference.inference_utils import precise_wait, preprocess_image
 
 np.set_printoptions(precision=4, suppress=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Editable knobs (kept at the top by request). Everything here is in
-# SCREAMING_SNAKE_CASE so it is easy to find and tune on the robot.
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── intervention detection (from the UDP packet) ─────────────────────────────
+# ── intervention detection 
 # The controller reports a per-joint policy torque scale. A human takeover is
 # any scale above this threshold; tune it on the robot.
 INTERVENTION_POLICY_TORQUE_SCALE_THRESHOLD = 0.5
@@ -45,48 +41,6 @@ HIL_POLICY_RELOAD_INTERVAL_S = 30.0  # pick up new learner checkpoints
 MAX_STATE_IMAGE_DT_NS = 100_000_000  # 100 ms state/image alignment tolerance
 
 
-def precise_sleep(dt: float, slack_time: float = 0.001, time_func=time.monotonic):
-    """Sleep most of ``dt``, then spin for the remainder to reduce jitter."""
-    t_start = time_func()
-    if dt > slack_time:
-        time.sleep(dt - slack_time)
-    t_end = t_start + dt
-    while time_func() < t_end:
-        pass
-
-
-def precise_wait(t_end: float, slack_time: float = 0.001, time_func=time.monotonic):
-    """Wait until ``t_end`` using a hybrid sleep/spin."""
-    t_start = time_func()
-    t_wait = t_end - t_start
-    if t_wait > 0:
-        t_sleep = t_wait - slack_time
-        if t_sleep > 0:
-            time.sleep(t_sleep)
-        while time_func() < t_end:
-            pass
-
-
-def preprocess_image(img_bgr: np.ndarray, out_size=(128, 128)) -> np.ndarray:
-    """Resize with padding, matching the simulator's ``resize_with_pad``.
-
-    OpenCV on the CPU is faster than a torch GPU resize for these small frames:
-    it avoids the host-to-device copy, kernel launch, and device-to-host copy.
-    """
-    h, w = img_bgr.shape[:2]
-    target_h, target_w = out_size
-    ratio = max(w / target_w, h / target_h)
-    new_h = int(h / ratio)
-    new_w = int(w / ratio)
-    resized = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    canvas = np.zeros((target_h, target_w, 3), np.uint8)
-    pad_h = (target_h - new_h) // 2
-    pad_w = (target_w - new_w) // 2
-    canvas[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = resized
-    return canvas
-
-
 class PiZeroTeleop:
     def __init__(
         self,
@@ -99,7 +53,7 @@ class PiZeroTeleop:
         checkpoint_path: str,
         model_config: str,
         action_horizon: int = 5,
-        loop_hz: int = 30,
+        loop_hz: int = 10,
         display_scale: int = 3,
         debug: bool = False,
         offline: bool = False,
@@ -198,7 +152,7 @@ class PiZeroTeleop:
 
         cprint("Initialization complete. Running teleop loop...", "green")
         cprint(
-            "Joystick Controls: OPTIONS ('o') Start/Pause/Save | SHARE ('x') Discard",
+            "Joystick Controls: OPTIONS ('o') Start/Pause/mark success | SHARE ('x') mark fail",
             "cyan",
         )
 
@@ -246,7 +200,7 @@ class PiZeroTeleop:
         elif self.loop_state == "RECORDING":
             self.loop_state = "PENDING"
             cprint("\n[RECORDER] EPISODE PAUSED", "yellow")
-            cprint("Press OPTIONS ('o') to Save, SHARE ('x') to Discard.", "cyan")
+            cprint("Press OPTIONS ('o') to mark success, SHARE ('x') to mark fail.", "cyan")
         elif self.loop_state == "PENDING":
             self._save_episode()
 
