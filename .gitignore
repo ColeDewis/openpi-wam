@@ -3,6 +3,7 @@ assets//*
 !assets//norm_stats.json
 checkpoints/
 data/
+!src/serl_launcher/data
 wandb/
 videos/
 demos/
