@@ -13,6 +13,10 @@ uv run scripts/train_rlpd.py \
 """
 
 from __future__ import annotations
+import os
+
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
+os.environ.setdefault("JAX_TRACEBACK_FILTERING", "off")
 
 import tyro
 

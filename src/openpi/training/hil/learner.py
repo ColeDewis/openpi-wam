@@ -28,9 +28,13 @@ from serl_launcher.utils.train_utils import concat_batches
 # RLPD follows hil-serl's CTA schedule: ``cta_ratio-1`` critic-only updates,
 # then one update that also moves the actor and temperature. The DQN gripper
 # (``grasp_critic``) and the intervention-cost critic train on every step.
-CRITIC_ONLY = frozenset({"critic", "grasp_critic", "cost_critic"})
+# CRITIC_ONLY = frozenset({"critic", "grasp_critic", "cost_critic"})
+CRITIC_ONLY = frozenset({"critic"})
+# FULL_UPDATE = frozenset(
+#     {"critic", "grasp_critic", "cost_critic", "actor", "temperature", "intervention"}
+# )
 FULL_UPDATE = frozenset(
-    {"critic", "grasp_critic", "cost_critic", "actor", "temperature", "intervention"}
+    {"critic", "actor", "temperature"}
 )
 
 
@@ -63,7 +67,7 @@ class LearnerConfig:
     soft_target_update_rate: float = 0.005
     reward_bias: float = 0.0
     target_entropy: float | None = None
-    target_intervention_rate: float = 0.05
+    target_intervention_rate: float = 0.15
     intervention_window: int = 20
 
     training_starts: int = 20
@@ -342,7 +346,7 @@ def run(cfg: LearnerConfig) -> None:
             agent, info = agent.update(
                 mixed_batch(online, demo, cfg.batch_size),
                 networks_to_update=FULL_UPDATE,
-                intervention_rate=intervention_rate,
+                # intervention_rate=intervention_rate,
             )
         else:
             if len(demo) == 0:

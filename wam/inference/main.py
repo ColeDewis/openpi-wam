@@ -97,22 +97,6 @@ class PiZeroTeleop:
         self.recv_port = recv_port
         self.DOF = dof
 
-        # even though we listen to the follower we actually also get leader data, just dont do anything with it for now
-        # also, leader data is just 0's if we dont start the leader
-        self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
-        self.follower_sender = TeleopUDPHandler(
-            self.remote_ip,
-            self.follower_send_port,
-            DOF=self.DOF,
-            action_size=self.action_size,
-        )
-        self.leader_sender = TeleopUDPHandler(
-            self.remote_ip,
-            self.leader_send_port,
-            DOF=self.DOF,
-            action_size=self.action_size,
-        )
-
 
         # FLIR setup
         camera_configs = {
@@ -149,6 +133,24 @@ class PiZeroTeleop:
                 )
             else:
                 raise ValueError(f"unknown policy {policy!r}")
+
+        
+        # even though we listen to the follower we actually also get leader data, just dont do anything with it for now
+        # also, leader data is just 0's if we dont start the leader
+        self.follower_listener = RecorderReceiver(self.remote_ip, self.recv_port, self.DOF)
+        self.follower_sender = TeleopUDPHandler(
+            self.remote_ip,
+            self.follower_send_port,
+            DOF=self.DOF,
+            action_size=self.action_size,
+        )
+        self.leader_sender = TeleopUDPHandler(
+            self.remote_ip,
+            self.leader_send_port,
+            DOF=self.DOF,
+            action_size=self.action_size,
+        )
+
 
         # Online transition collection (RLPD: online+demo, HG-Dagger: demo only).
         # The recorder reads the algorithm from the loaded policy checkpoint.
