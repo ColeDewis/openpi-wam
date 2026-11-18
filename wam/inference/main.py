@@ -141,12 +141,14 @@ class PiZeroTeleop:
         self.follower_sender = TeleopUDPHandler(
             self.remote_ip,
             self.follower_send_port,
+            horizon=action_horizon if policy == "openpi" else 1,
             DOF=self.DOF,
             action_size=self.action_size,
         )
         self.leader_sender = TeleopUDPHandler(
             self.remote_ip,
             self.leader_send_port,
+            horizon=action_horizon if policy == "openpi" else 1,
             DOF=self.DOF,
             action_size=self.action_size,
         )
@@ -450,6 +452,15 @@ class PiZeroTeleop:
                         # the encoder observation for that transition.
                         intervened = self._detect_intervention(state_dict)
                         action_delta_jp, action_norm, obs_enc = self.policy.act(obs)
+
+
+                        self.follower_sender.send_action_chunk(
+                                action_delta_jp[None, :],
+                        )
+                        self.leader_sender.send_action_chunk(
+                                action_delta_jp[None, :],
+                        )
+
                         if intervened:
                             # the intervention is the action we want to record
                             # do NOT send it back; the operator is in control.
@@ -463,19 +474,6 @@ class PiZeroTeleop:
                                 action_norm,
                                 intervened=intervened,
                             )
-
-                        self.follower_sender.send_action_chunk(
-                            np.tile(
-                                action_delta_jp[None],
-                                (self.action_horizon, 1),
-                            )
-                        )
-                        self.leader_sender.send_action_chunk(
-                            np.tile(
-                                action_delta_jp[None],
-                                (self.action_horizon, 1),
-                            )
-                        )
 
 
                 # Keep the last packet for the next step's intervention delta.

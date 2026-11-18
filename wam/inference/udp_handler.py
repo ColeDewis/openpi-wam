@@ -46,8 +46,8 @@ class TeleopUDPHandler:
                 f"got {actions.shape}"
             )
 
-        now_ns = time.time_ns()
-        header = struct.pack(self.header_fmt, now_ns)
+        # 0 because we dont want to skip any actions in the rlpd approach
+        header = struct.pack(self.header_fmt, 0)
         payload = header + actions.tobytes()
 
         try:
