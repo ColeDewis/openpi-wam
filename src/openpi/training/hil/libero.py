@@ -715,6 +715,16 @@ class SimConfig:
         return 7 if self.rotation else 4
 
     @property
+    def agent(self) -> str:
+        if self.algorithm == "hgdagger":
+            return "bc"
+        return "sac_hybrid_single" if self.use_gripper else "sac"
+
+    @property
+    def use_intervention_cost(self) -> bool:
+        return self.agent == "sac_hybrid_single"
+
+    @property
     def demo_output_dir(self) -> Path:
         """Directory used by ``--record-demos`` (first ``--demo-path`` entry)."""
         return Path(self.demo_path[0]) if self.demo_path else Path("demos/hil_libero")
@@ -868,12 +878,16 @@ class HilLiberoTrainer:
             return
 
         self._check_checkpoint_config()
+        self.critic_only, self.full_update = _learner.update_sets(
+            cfg.agent, cfg.use_intervention_cost
+        )
         self.agent = _encoders.make_encoder_agent(
-            "bc" if cfg.algorithm == "hgdagger" else "sac",
+            cfg.agent,
             cfg.encoder,
             cfg.seed,
             cfg.action_dim,
             use_gripper=cfg.use_gripper,
+            use_intervention_cost=cfg.use_intervention_cost,
             reward_bias=0.0,
             target_entropy=None,
             discount=cfg.discount,
@@ -1902,20 +1916,18 @@ class HilLiberoTrainer:
                 if cfg.algorithm == "rlpd":
                     for _ in range(max(cfg.cta_ratio - 1, 0)):
                         batch = _learner.mixed_batch(self.online, self.demo, cfg.batch_size)
-                        agent, _ = agent.update(batch, networks_to_update=_learner.CRITIC_ONLY)
+                        agent, _ = agent.update(batch, networks_to_update=self.critic_only)
                     batch = _learner.mixed_batch(self.online, self.demo, cfg.batch_size)
-                    # Before the first episode completes, pass the target so
-                    # the multiplier does not decay for no reason.
-                    intervention_rate = (
-                        self.intervention_tracker.rate
-                        if self.intervention_tracker.num_episodes > 0
-                        else cfg.target_intervention_rate
-                    )
-                    agent, info = agent.update(
-                        batch,
-                        networks_to_update=_learner.FULL_UPDATE,
-                        intervention_rate=intervention_rate,
-                    )
+                    update_kwargs = {"networks_to_update": self.full_update}
+                    if cfg.use_intervention_cost:
+                        # Before the first episode completes, pass the target so
+                        # the multiplier does not decay for no reason.
+                        update_kwargs["intervention_rate"] = (
+                            self.intervention_tracker.rate
+                            if self.intervention_tracker.num_episodes > 0
+                            else cfg.target_intervention_rate
+                        )
+                    agent, info = agent.update(batch, **update_kwargs)
                     n_updates = max(cfg.cta_ratio, 1)
                 else:
                     agent, info = agent.update(_learner.sample_buffer(self.demo, cfg.batch_size))

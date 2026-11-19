@@ -1,11 +1,13 @@
 """Shared learner loop for RLPD (SAC) and HG-Dagger (BC).
 
 The actor writes transition pickles under ``data_dir`` (``online/`` and
-``demo/``); this loop tails them, trains, and checkpoints. The two entry points
-are thin wrappers:
+``demo/``); this loop tails them, trains, and checkpoints.
 
-    scripts/train_rlpd.py      -> run(..., algorithm="rlpd")
-    scripts/train_hgdagger.py  -> run(..., algorithm="hgdagger")
+The agent is selected explicitly with ``agent``:
+
+    "bc"               -- HG-Dagger behaviour cloning
+    "sac"              -- continuous SAC (with or without a gripper dim)
+    "sac_hybrid_single"-- SAC plus a DQN grasp critic for a discrete gripper
 """
 
 from __future__ import annotations
@@ -25,17 +27,21 @@ from openpi.training.hil import encoders as _encoders
 from openpi.training.hil import transitions as _transitions
 from serl_launcher.utils.train_utils import concat_batches
 
-# RLPD follows hil-serl's CTA schedule: ``cta_ratio-1`` critic-only updates,
-# then one update that also moves the actor and temperature. The DQN gripper
-# (``grasp_critic``) and the intervention-cost critic train on every step.
-# CRITIC_ONLY = frozenset({"critic", "grasp_critic", "cost_critic"})
-CRITIC_ONLY = frozenset({"critic"})
-# FULL_UPDATE = frozenset(
-#     {"critic", "grasp_critic", "cost_critic", "actor", "temperature", "intervention"}
-# )
-FULL_UPDATE = frozenset(
-    {"critic", "actor", "temperature"}
-)
+AGENT_KINDS = ("bc", "sac", "sac_hybrid_single")
+
+
+def update_sets(agent: str, use_intervention_cost: bool) -> tuple[frozenset[str], frozenset[str]]:
+    """Networks updated on critic-only steps and on full CTA steps."""
+    critic_only = {"critic"}
+    if agent == "sac_hybrid_single":
+        critic_only.add("grasp_critic")
+    if use_intervention_cost:
+        critic_only.add("cost_critic")
+
+    full_update = critic_only | {"actor", "temperature"}
+    if use_intervention_cost:
+        full_update.add("intervention")
+    return frozenset(critic_only), frozenset(full_update)
 
 
 @dataclasses.dataclass
@@ -48,15 +54,13 @@ class LearnerConfig:
 
     encoder: _encoders.EncoderConfig = dataclasses.field(default_factory=_encoders.EncoderConfig)
 
-    algorithm: str = "rlpd"
+    agent: str = "sac"
     seed: int = 42
-    action_dim: int = 7
 
     use_gripper: bool = False
+    use_intervention_cost: bool = True
 
-
-    # Base policy metadata. ``encoder.proprio_dim`` already includes
-    # ``base_action_dim`` when the actor appends a base action to proprio.
+    # Base policy metadata. ``encoder.proprio_dim`` includes these values.
     base_policy: str = "none"
     base_action_dim: int = 0
 
@@ -80,37 +84,49 @@ class LearnerConfig:
     checkpoint_period: int = 1_000
     keep: int = 20
 
+    @property
+    def action_dim(self) -> int:
+        return 7 + int(self.use_gripper)
+
+    @property
+    def proprio_dim(self) -> int:
+        return self.action_dim + self.base_action_dim
+
+    @property
+    def algorithm(self) -> str:
+        return "hgdagger" if self.agent == "bc" else "rlpd"
+
+    @property
+    def is_bc(self) -> bool:
+        return self.agent == "bc"
+
+    @property
+    def uses_intervention_cost(self) -> bool:
+        return self.agent == "sac_hybrid_single" and self.use_intervention_cost
+
+    @property
+    def critic_only(self) -> frozenset[str]:
+        return update_sets(self.agent, self.uses_intervention_cost)[0]
+
+    @property
+    def full_update(self) -> frozenset[str]:
+        return update_sets(self.agent, self.uses_intervention_cost)[1]
+
     def __post_init__(self):
         if not self.data_dir:
             raise ValueError("--data-dir is required (it is written by wam/inference/main.py)")
         if not self.checkpoint_dir:
             raise ValueError("--checkpoint-dir is required")
-        if self.algorithm not in ("rlpd", "hgdagger"):
-            raise ValueError(f"algorithm must be 'rlpd' or 'hgdagger', got {self.algorithm!r}")
+        if self.agent not in AGENT_KINDS:
+            raise ValueError(f"agent must be one of {AGENT_KINDS}, got {self.agent!r}")
+        if self.agent == "sac_hybrid_single" and not self.use_gripper:
+            raise ValueError("agent='sac_hybrid_single' requires use_gripper=True")
         if self.base_action_dim < 0:
             raise ValueError(f"base_action_dim must be non-negative, got {self.base_action_dim}")
-        if not 0.0 <= self.target_intervention_rate <= 1.0:
-            raise ValueError(
-                "target_intervention_rate must be in [0, 1], "
-                f"got {self.target_intervention_rate}"
-            )
-        if self.intervention_window <= 0:
-            raise ValueError(
-                f"intervention_window must be positive, got {self.intervention_window}"
-            )
 
-        # Keep the top-level metadata and the encoder config in sync. When a
-        # base policy is used, the raw WAM proprio grows by base_action_dim.
-        if self.encoder.base_action_dim and not self.base_action_dim:
-            self.base_action_dim = self.encoder.base_action_dim
-        elif self.base_action_dim and self.encoder.base_action_dim not in (0, self.base_action_dim):
-            raise ValueError(
-                f"base_action_dim={self.base_action_dim} conflicts with "
-                f"encoder.base_action_dim={self.encoder.base_action_dim}"
-            )
+        # One source of truth: widths come from the agent/gripper/base layout.
         self.encoder.base_action_dim = self.base_action_dim
-        if self.base_action_dim and self.encoder.proprio_dim == _encoders.WAM_PROPRIO_DIM:
-            self.encoder.proprio_dim = _encoders.WAM_PROPRIO_DIM + self.base_action_dim
+        self.encoder.proprio_dim = self.proprio_dim
 
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
         Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
@@ -118,11 +134,12 @@ class LearnerConfig:
 
 def _agent_from_config(cfg: LearnerConfig):
     return _encoders.make_encoder_agent(
-        "bc" if cfg.algorithm == "hgdagger" else "sac",
+        cfg.agent,
         cfg.encoder,
         cfg.seed,
         cfg.action_dim,
         use_gripper=cfg.use_gripper,
+        use_intervention_cost=cfg.uses_intervention_cost,
         reward_bias=cfg.reward_bias,
         target_entropy=cfg.target_entropy,
         discount=cfg.discount,
@@ -133,12 +150,14 @@ def _agent_from_config(cfg: LearnerConfig):
 
 def save_run_config(cfg: LearnerConfig) -> None:
     payload = {
+        "agent": cfg.agent,
         "algorithm": cfg.algorithm,
         "action_dim": cfg.action_dim,
         "use_gripper": bool(cfg.use_gripper),
+        "use_intervention_cost": bool(cfg.uses_intervention_cost),
         "encoder": dataclasses.asdict(cfg.encoder),
-        "base_policy": getattr(cfg, "base_policy", "none"),
-        "base_action_dim": getattr(cfg, "base_action_dim", 0),
+        "base_policy": cfg.base_policy,
+        "base_action_dim": cfg.base_action_dim,
         "bottleneck_label": bool(getattr(cfg, "bottleneck_label", False)),
         "dmp_gripper": bool(getattr(cfg, "dmp_gripper", False)),
         "residual_max": float(getattr(cfg, "residual_max", 1.0)),
@@ -251,17 +270,14 @@ def mixed_batch(online, demo, batch_size: int):
 
 def run(cfg: LearnerConfig) -> None:
     """Train one agent from the pickles under ``cfg.data_dir``."""
-    # A pre-Lagrange RLPD checkpoint lacks the cost critic and intervention
-    # multiplier, so restoring it would fail. Reject it with a clear message.
-    config_path = Path(cfg.checkpoint_dir) / "config.json"
-    if cfg.algorithm == "rlpd" and config_path.exists():
-        old = json.loads(config_path.read_text())
-        if old.get("target_intervention_rate") is None:
-            raise ValueError(
-                f"{config_path} predates the intervention-cost networks; "
-                "use a fresh --checkpoint-dir"
-            )
     save_run_config(cfg)
+    print(
+        f"[learner] agent={cfg.agent} use_gripper={cfg.use_gripper} "
+        f"use_intervention_cost={cfg.uses_intervention_cost}"
+    )
+    print(f"[learner] CRITIC_ONLY={sorted(cfg.critic_only)}")
+    print(f"[learner] FULL_UPDATE={sorted(cfg.full_update)}")
+
     agent = _agent_from_config(cfg)
 
     # Always resume from the latest checkpoint, if there is one.
@@ -277,9 +293,11 @@ def run(cfg: LearnerConfig) -> None:
         save_agent_checkpoint(cfg, agent, 0)
 
     online = (
-        _encoders.make_encoder_buffer(cfg.encoder, cfg.replay_buffer_capacity, cfg.action_dim)
-        if cfg.algorithm == "rlpd"
-        else None
+        None
+        if cfg.is_bc
+        else _encoders.make_encoder_buffer(
+            cfg.encoder, cfg.replay_buffer_capacity, cfg.action_dim
+        )
     )
     demo = _encoders.make_encoder_buffer(cfg.encoder, cfg.replay_buffer_capacity, cfg.action_dim)
     tracker = InterventionRateTracker(cfg.intervention_window)
@@ -292,7 +310,7 @@ def run(cfg: LearnerConfig) -> None:
     )
 
     # HG-Dagger: BC pretraining on the initial intervention set.
-    if cfg.algorithm == "hgdagger" and cfg.pretrain_steps > 0 and step == 0:
+    if cfg.is_bc and cfg.pretrain_steps > 0 and step == 0:
         while len(demo) == 0:
             time.sleep(cfg.poll_interval)
             _, episodes = _sync(cfg, seen, online, demo)
@@ -323,7 +341,7 @@ def run(cfg: LearnerConfig) -> None:
                 )
             last_sync = now
 
-        if cfg.algorithm == "rlpd":
+        if not cfg.is_bc:
             if len(online) < cfg.training_starts:
                 time.sleep(cfg.poll_interval)
                 last_sync = 0.0
@@ -333,20 +351,22 @@ def run(cfg: LearnerConfig) -> None:
             for _ in range(max(cfg.cta_ratio - 1, 0)):
                 agent, _ = agent.update(
                     mixed_batch(online, demo, cfg.batch_size),
-                    networks_to_update=CRITIC_ONLY,
+                    networks_to_update=cfg.critic_only,
                 )
                 step += 1
-            # Before the first episode completes, pass the target so the
-            # multiplier does not decay for no reason.
-            intervention_rate = (
-                tracker.rate
-                if tracker.num_episodes > 0
-                else cfg.target_intervention_rate
-            )
+
+            update_kwargs = {"networks_to_update": cfg.full_update}
+            if cfg.uses_intervention_cost:
+                # Before the first episode completes, pass the target so the
+                # multiplier does not decay for no reason.
+                update_kwargs["intervention_rate"] = (
+                    tracker.rate
+                    if tracker.num_episodes > 0
+                    else cfg.target_intervention_rate
+                )
             agent, info = agent.update(
                 mixed_batch(online, demo, cfg.batch_size),
-                networks_to_update=FULL_UPDATE,
-                # intervention_rate=intervention_rate,
+                **update_kwargs,
             )
         else:
             if len(demo) == 0:

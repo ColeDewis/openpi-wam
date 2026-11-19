@@ -20,7 +20,7 @@ from openpi.training.hil import learner as _learner
 
 
 def main(cfg: _learner.LearnerConfig) -> None:
-    cfg.algorithm = "hgdagger"
+    cfg.agent = "bc"
     _learner.run(cfg)
 
 

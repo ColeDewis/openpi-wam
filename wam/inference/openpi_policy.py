@@ -9,6 +9,8 @@ from openpi.training import config as _config
 from openpi.training import checkpoints as _checkpoints
 from scipy.spatial.transform import Rotation as R
 
+from wam.inference.policy import PolicyTemplate
+
 # TODO: only libero works for now
 
 # NOTE a bit lower than actual for safety
@@ -64,9 +66,21 @@ def delta_to_wrench(delta: np.ndarray) -> np.ndarray:
  
 
 
-class OpenPIPolicy:
-    def __init__(self, checkpoint_path: str, model_config: str, cfg_type: str = "libero", debug: bool = False, dof: int=7):
+class OpenPIPolicy(PolicyTemplate):
+    def __init__(
+        self,
+        checkpoint_path: str,
+        model_config: str,
+        cfg_type: str = "libero",
+        debug: bool = False,
+        dof: int = 7,
+        action_horizon: int = 5,
+    ):
         self.debug = debug
+        self.horizon = action_horizon
+        self.action_size = 7
+        self.needs_images = True
+        self.image_size = (224, 224)
 
         cprint(
             f"Loading {cfg_type} policy with config: {model_config} from {checkpoint_path}...",
@@ -81,7 +95,6 @@ class OpenPIPolicy:
             return
 
         self.DOF = dof
-        self.image_size = (224, 224)
 
         self.checkpoint_path = checkpoint_path
         self.config = _config.get_config(model_config)

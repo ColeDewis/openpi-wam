@@ -9,7 +9,8 @@ automatically.
 Example:
 uv run scripts/train_rlpd.py \
         --data-dir /home/serg/projects/openpi-wam/interventions/test \
-        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/test_rlpd
+        --checkpoint-dir /home/serg/projects/openpi-wam/checkpoints/hil/test_rlpd \
+        --agent sac_hybrid_single --use-gripper --use-intervention-cost
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from openpi.training.hil import learner as _learner
 
 
 def main(cfg: _learner.LearnerConfig) -> None:
-    cfg.algorithm = "rlpd"
     _learner.run(cfg)
 
 

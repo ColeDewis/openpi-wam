@@ -27,10 +27,11 @@ from serl_launcher.utils.launcher import make_agent
 
 ENCODER_KINDS = ("hilserl", "rltoken", "timm")
 
-# WAM proprio fed to every encoder/agent:
-#   follower_jp(7) + discrete gripper position(1)
+# WAM proprio fed to every encoder:
+#   follower_jp(7) + optional discrete gripper position(1)
 # This mirrors the simulator's compact state and the 8-dim WAM joint state.
-WAM_PROPRIO_DIM = 8
+WAM_JOINT_DIM = 7
+WAM_PROPRIO_DIM = WAM_JOINT_DIM + 1
 
 
 @dataclasses.dataclass
@@ -48,11 +49,10 @@ class EncoderConfig:
     # Observation shape. The WAM defaults match the tested simulator:
     # 8-dim proprio (joint positions + discrete gripper) and 128x128 frames.
     #
-    # ``proprio_dim`` is the TOTAL state width. When a base policy is used,
-    # ``base_action_dim`` values are appended to the raw WAM proprio (or are
-    # already included by the LIBERO adapter). For WAM:
-    #   proprio_dim == WAM_PROPRIO_DIM + base_action_dim
-    proprio_dim: int = WAM_PROPRIO_DIM
+    # ``proprio_dim`` is the TOTAL state width. It is resolved by
+    # ``LearnerConfig`` from ``action_dim + base_action_dim``; the simulator
+    # supplies its own width explicitly.
+    proprio_dim: int = 0
     base_action_dim: int = 0
     image_size: tuple[int, int] = (128, 128)
 
@@ -74,8 +74,8 @@ class EncoderConfig:
         # config.json rebuilds the same observation space.
         self.image_keys = tuple(self.image_keys)
         self.image_size = tuple(self.image_size)
-        if self.proprio_dim <= 0:
-            raise ValueError(f"proprio_dim must be positive, got {self.proprio_dim}")
+        if self.proprio_dim < 0:
+            raise ValueError(f"proprio_dim must be non-negative, got {self.proprio_dim}")
         if self.base_action_dim < 0:
             raise ValueError(f"base_action_dim must be non-negative, got {self.base_action_dim}")
         if len(self.image_size) != 2:
@@ -137,35 +137,34 @@ def action_space(action_dim: int = 8) -> gym.spaces.Box:
 
 
 def make_encoder_agent(
-    algorithm: str,
+    agent_kind: str,
     cfg: EncoderConfig,
     seed: int,
     action_dim: int = 8,
     *,
     use_gripper: bool = True,
+    use_intervention_cost: bool = False,
     reward_bias: float = 0.0,
     target_entropy: float | None = None,
     discount: float = 0.985,
     soft_target_update_rate: float = 0.005,
     target_intervention_rate: float = 0.05,
 ):
-    """RLPD (``sac``) or HG-Dagger (``bc``) agent for the configured encoder.
+    """Build the explicitly selected ``bc`` / ``sac`` / ``sac_hybrid_single`` agent.
 
-    RLPD is hil-serl's hybrid agent: continuous SAC over the first ``action_dim - 1``
-    dims plus a DQN "grasp critic" over the discrete gripper {-1 open, 0 hold, +1 close}.
-    Every caller that asks for ``"sac"`` (learner, sim, ``HilPolicy``) therefore gets the
-    same architecture, so checkpoints restore on both sides.
+    ``use_gripper`` describes the action/observation layout. It does not select
+    the agent: plain ``sac`` works with or without a gripper, and only
+    ``sac_hybrid_single`` adds the DQN grasp critic.
     """
-    if algorithm == "sac" and use_gripper:
-        algorithm = "sac_hybrid"
     return make_agent(
-        algorithm,
+        agent_kind,
         seed,
         sample_obs(cfg),
         np.zeros((action_dim,), np.float32),
         encoder_kind=cfg.kind,
         image_keys=cfg.image_keys,
         encoder_type=cfg.hilserl_encoder_type,
+        use_intervention_cost=use_intervention_cost,
         reward_bias=reward_bias,
         target_entropy=target_entropy,
         discount=discount,

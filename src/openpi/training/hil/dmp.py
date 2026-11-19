@@ -3,6 +3,8 @@
 The dynamics come from ``movement_primitives``.  This module only adapts the
 library's absolute-pose rollout to LIBERO's normalized delta-pose action space
 and provides the residual composition used by the actor.
+
+USED FOR SIM ONLY
 """
 
 from __future__ import annotations

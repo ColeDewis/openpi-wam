@@ -177,6 +177,7 @@ def make_sac_hybrid_agent(
     encoder_kind="hilserl",
     image_keys=("front_image", "wrist_image"),
     encoder_type="resnet-pretrained",
+    use_intervention_cost=True,
     reward_bias=0.0,
     target_entropy=None,
     discount=0.97,
@@ -202,6 +203,7 @@ def make_sac_hybrid_agent(
         policy_network_kwargs=mlp(),
         temperature_init=1e-2,
         target_intervention_rate=target_intervention_rate,
+        use_intervention_cost=use_intervention_cost,
         discount=discount,
         soft_target_update_rate=soft_target_update_rate,
         backup_entropy=False,
@@ -234,7 +236,7 @@ def make_sac_hybrid_agent(
 
 
 def make_agent(
-    algorithm,
+    agent_kind,
     seed,
     sample_obs,
     sample_action,
@@ -242,22 +244,15 @@ def make_agent(
     encoder_kind="hilserl",
     image_keys=("front_image", "wrist_image"),
     encoder_type="resnet-pretrained",
+    use_intervention_cost=False,
     reward_bias=0.0,
     target_entropy=None,
     discount=0.97,
     soft_target_update_rate=0.005,
     target_intervention_rate=0.05,
 ):
-    """Build the RLPD (``sac``) or HG-Dagger (``bc``) agent for an encoder kind.
-
-    encoder_kind:
-        hilserl  -- images are encoded inside the agent by a ResNet-10, as upstream.
-        rltoken  -- observations are frozen VLA RL-token features (``{"state"}``).
-        timm     -- observations are frozen timm features (``{"state"}``).
-    """
-    if algorithm not in ("sac", "sac_hybrid", "bc"):
-        raise ValueError(f"unknown algorithm {algorithm!r} (expected 'sac', 'sac_hybrid' or 'bc')")
-    if algorithm == "sac_hybrid":
+    """Build the explicitly selected ``bc`` / ``sac`` / ``sac_hybrid_single`` agent."""
+    if agent_kind == "sac_hybrid_single":
         return make_sac_hybrid_agent(
             seed,
             sample_obs,
@@ -265,33 +260,34 @@ def make_agent(
             encoder_kind=encoder_kind,
             image_keys=image_keys,
             encoder_type=encoder_type,
+            use_intervention_cost=use_intervention_cost,
             reward_bias=reward_bias,
             target_entropy=target_entropy,
             discount=discount,
             soft_target_update_rate=soft_target_update_rate,
             target_intervention_rate=target_intervention_rate,
         )
-    if encoder_kind == "hilserl":
-        if algorithm == "bc":
+    if agent_kind == "bc":
+        if encoder_kind == "hilserl":
             return make_bc_agent(seed, sample_obs, sample_action, image_keys, encoder_type)
-        return make_sac_pixel_agent(
-            seed,
-            sample_obs,
-            sample_action,
-            image_keys,
-            encoder_type,
-            reward_bias,
-            target_entropy,
-            discount,
-            soft_target_update_rate,
-        )
-    if encoder_kind in ("rltoken", "timm"):
-        if algorithm == "bc":
-            return make_bc_lowdim_agent(seed, sample_obs, sample_action)
+        return make_bc_lowdim_agent(seed, sample_obs, sample_action)
+    if agent_kind == "sac":
+        if encoder_kind == "hilserl":
+            return make_sac_pixel_agent(
+                seed,
+                sample_obs,
+                sample_action,
+                image_keys,
+                encoder_type,
+                reward_bias,
+                target_entropy,
+                discount,
+                soft_target_update_rate,
+            )
         return make_sac_lowdim_agent(
             seed, sample_obs, sample_action, reward_bias, target_entropy, discount, soft_target_update_rate
         )
-    raise ValueError(f"unknown encoder_kind {encoder_kind!r}")
+    raise ValueError(f"unknown agent {agent_kind!r}")
 
 
 def linear_schedule(step):

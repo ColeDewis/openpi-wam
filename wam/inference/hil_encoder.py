@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from openpi.training.hil.encoders import WAM_PROPRIO_DIM
+from openpi.training.hil.encoders import WAM_JOINT_DIM
 from openpi.training.hil.encoders import EncoderConfig
 from wam.inference.openpi_policy import quat_to_rotvec
 
@@ -59,17 +59,23 @@ def vla_state(low_dim: dict) -> np.ndarray:
     ).astype(np.float32)
 
 
-def wam_proprio(low_dim: dict, base_action: np.ndarray | None = None) -> np.ndarray:
-    """8-dim RL proprio shared by all three WAM encoders.
+def wam_proprio(
+    low_dim: dict,
+    base_action: np.ndarray | None = None,
+    *,
+    use_gripper: bool = True,
+) -> np.ndarray:
+    """Raw WAM proprio shared by all three encoders.
 
-    The real-robot state is follower joint positions plus a discrete gripper
-    position. When a base policy is active, its normalized absolute joint
-    action (``policy_jp``) is appended, making the state
-    ``WAM_PROPRIO_DIM + base_action_dim`` wide.
+    The real-robot state is follower joint positions plus an optional discrete
+    gripper position. When a base policy is active, its normalized absolute
+    joint action (``policy_jp``) is appended.
     """
     jp = np.asarray(low_dim["follower_jp"], np.float32)
-    gripper = discrete_gripper(float(low_dim.get("gripper_pos", 0.0)))
-    parts = [jp, np.asarray([gripper], np.float32)]
+    parts = [jp]
+    if use_gripper:
+        gripper = discrete_gripper(float(low_dim.get("gripper_pos", 0.0)))
+        parts.append(np.asarray([gripper], np.float32))
     if base_action is not None:
         parts.append(np.asarray(base_action, np.float32).reshape(-1))
     return np.concatenate(parts).astype(np.float32)
@@ -94,18 +100,14 @@ def _base_action_from_low_dim(cfg: EncoderConfig, low_dim: dict) -> np.ndarray |
     return action
 
 
-def _require_wam_proprio(cfg: EncoderConfig) -> None:
-    """The WAM encoders emit ``WAM_PROPRIO_DIM + base_action_dim`` features.
-
-    The LIBERO simulator has a different proprio (8/17 dims) and its own
-    adapter (``openpi.training.hil.libero``); catching the mismatch here keeps
-    a sim checkpoint from being deployed against WAM packets by accident.
-    """
-    expected = WAM_PROPRIO_DIM + cfg.base_action_dim
+def _require_wam_proprio(cfg: EncoderConfig, use_gripper: bool) -> None:
+    """The WAM encoders emit ``WAM_JOINT_DIM + gripper + base_action`` features."""
+    expected = WAM_JOINT_DIM + int(use_gripper) + cfg.base_action_dim
     if cfg.proprio_dim != expected:
         raise ValueError(
             f"WAM encoders produce {expected}-dim proprio "
-            f"({WAM_PROPRIO_DIM} raw + {cfg.base_action_dim} base action), "
+            f"({WAM_JOINT_DIM} joints + {int(use_gripper)} gripper "
+            f"+ {cfg.base_action_dim} base action), "
             f"got encoder.proprio_dim={cfg.proprio_dim}. "
             "Use the LIBERO adapter for simulator checkpoints."
         )
@@ -114,10 +116,17 @@ def _require_wam_proprio(cfg: EncoderConfig) -> None:
 class WamHilserlEncoder:
     """Raw images + proprio for the agent's own ResNet-10."""
 
-    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
-        _require_wam_proprio(cfg)
+    def __init__(
+        self,
+        cfg: EncoderConfig,
+        image_size: tuple[int, int] = (128, 128),
+        *,
+        use_gripper: bool = True,
+    ):
+        _require_wam_proprio(cfg, use_gripper)
         self.cfg = cfg
         self.image_size = image_size
+        self.use_gripper = use_gripper
 
     def encode(self, raw_obs: dict) -> dict:
         obs = {
@@ -125,7 +134,11 @@ class WamHilserlEncoder:
             for key in self.cfg.image_keys
         }
         base_action = _base_action_from_low_dim(self.cfg, raw_obs["low_dim"])
-        obs["state"] = wam_proprio(raw_obs["low_dim"], base_action)[None]  # (T=1, D)
+        obs["state"] = wam_proprio(
+            raw_obs["low_dim"],
+            base_action,
+            use_gripper=self.use_gripper,
+        )[None]  # (T=1, D)
         return obs
 
 
@@ -137,8 +150,14 @@ class WamRltokenEncoder:
     the action denoising loop is skipped because only ``z_rl`` is needed here.
     """
 
-    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
-        _require_wam_proprio(cfg)
+    def __init__(
+        self,
+        cfg: EncoderConfig,
+        image_size: tuple[int, int] = (128, 128),
+        *,
+        use_gripper: bool = True,
+    ):
+        _require_wam_proprio(cfg, use_gripper)
         if not cfg.rlt_checkpoint_dir:
             raise ValueError("encoder.kind='rltoken' needs --encoder.rlt_checkpoint_dir")
 
@@ -155,6 +174,7 @@ class WamRltokenEncoder:
         self._jnp = jnp
         self._model = _model
         self.cfg = cfg
+        self.use_gripper = use_gripper
 
         graphdef, state, model_config, train_cfg = load_pi0_model(
             cfg.rlt_checkpoint_dir,
@@ -214,7 +234,12 @@ class WamRltokenEncoder:
         )
         z_rl = np.asarray(self._encode_impl(self._state, observation))[0]
         base_action = _base_action_from_low_dim(self.cfg, raw_obs["low_dim"])
-        return {"state": np.concatenate([z_rl, wam_proprio(raw_obs["low_dim"], base_action)]).astype(np.float32)}
+        proprio = wam_proprio(
+            raw_obs["low_dim"],
+            base_action,
+            use_gripper=self.use_gripper,
+        )
+        return {"state": np.concatenate([z_rl, proprio]).astype(np.float32)}
 
     def _normalized_vla_state(self, low_dim: dict) -> np.ndarray:
         state = vla_state(low_dim)
@@ -237,13 +262,20 @@ class WamTimmEncoder:
     for now.
     """
 
-    def __init__(self, cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
-        _require_wam_proprio(cfg)
+    def __init__(
+        self,
+        cfg: EncoderConfig,
+        image_size: tuple[int, int] = (128, 128),
+        *,
+        use_gripper: bool = True,
+    ):
+        _require_wam_proprio(cfg, use_gripper)
         import timm
         import torch
 
         self.cfg = cfg
         self.image_size = image_size
+        self.use_gripper = use_gripper
         self._torch = torch
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         try:
@@ -270,17 +302,28 @@ class WamTimmEncoder:
     def encode(self, raw_obs: dict) -> dict:
         parts = [self._features(np.asarray(raw_obs[key])) for key in self.cfg.image_keys]
         base_action = _base_action_from_low_dim(self.cfg, raw_obs["low_dim"])
-        parts.append(wam_proprio(raw_obs["low_dim"], base_action))
+        parts.append(
+            wam_proprio(
+                raw_obs["low_dim"],
+                base_action,
+                use_gripper=self.use_gripper,
+            )
+        )
         return {"state": np.concatenate(parts).astype(np.float32)}
 
 
-def make_encoder(cfg: EncoderConfig, image_size: tuple[int, int] = (128, 128)):
+def make_encoder(
+    cfg: EncoderConfig,
+    image_size: tuple[int, int] = (128, 128),
+    *,
+    use_gripper: bool = True,
+):
     if cfg.kind == "hilserl":
-        return WamHilserlEncoder(cfg, image_size)
+        return WamHilserlEncoder(cfg, image_size, use_gripper=use_gripper)
     if cfg.kind == "rltoken":
-        return WamRltokenEncoder(cfg, image_size)
+        return WamRltokenEncoder(cfg, image_size, use_gripper=use_gripper)
     if cfg.kind == "timm":
-        return WamTimmEncoder(cfg, image_size)
+        return WamTimmEncoder(cfg, image_size, use_gripper=use_gripper)
     raise ValueError(f"unknown encoder kind {cfg.kind!r}")
 
 
