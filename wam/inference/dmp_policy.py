@@ -28,12 +28,14 @@ class DMPPolicy(PolicyTemplate):
         n_weights_per_dim: int = 20,
         inf_buffer: float = 0.1,
     ):
-        trajectory = self._load_trajectory(trajectory_path, dof, use_gripper)
+        self.dt = dt
+        trajectory = self._load_trajectory(trajectory_path, dof, use_gripper, self.dt)
 
-        execution_time = (len(trajectory) - 1) * dt
+
+        execution_time = (len(trajectory) - 1) * self.dt
         self.dmp = DMP(
             n_dims=trajectory.shape[1],
-            dt=dt,
+            dt=self.dt,
             n_weights_per_dim=n_weights_per_dim,
         )
         time = np.linspace(0.0, execution_time, len(trajectory))
@@ -54,17 +56,25 @@ class DMPPolicy(PolicyTemplate):
         self._sent = False
 
     @staticmethod
-    def _load_trajectory(path: str, dof: int, use_gripper: bool) -> np.ndarray:
+    def _load_trajectory(path: str, dof: int, use_gripper: bool, dt: float) -> np.ndarray:
         with h5py.File(path, "r") as f:
-            joint_positions = np.asarray(f["low_dim/follower_jp"], np.float64)
+            joint_positions = np.asarray(f["low_dim/leader_jp"], np.float64)
             if joint_positions.shape[1] != dof:
                 raise ValueError(
                     f"trajectory has {joint_positions.shape[1]} joints, expected {dof}"
                 )
-            if not use_gripper:
-                return joint_positions
-            gripper = np.asarray(f["low_dim/gripper_pos"], np.float64).reshape(-1, 1)
-        return np.concatenate([joint_positions, gripper], axis=1)
+            if use_gripper:
+                gripper = np.asarray(f["low_dim/gripper_pos"], np.float64).reshape(-1, 1)
+                trajectory = np.concatenate([joint_positions, gripper], axis=1)
+            else:
+                trajectory = joint_positions
+
+        # Downsample from 500 Hz to the DMP execution frequency.
+        stride = int(round(500 * dt))
+        idx = np.arange(0, len(trajectory), stride)
+        trajectory = trajectory[idx]
+
+        return trajectory
 
     def start(self) -> None:
         self._rollout = None
@@ -76,8 +86,8 @@ class DMPPolicy(PolicyTemplate):
             return
 
         low_dim = obs["low_dim"]
-        start_y = list(np.asarray(low_dim["follower_jp"], np.float64))
-        start_yd = list(np.asarray(low_dim.get("follower_jv", np.zeros(self.dof)), np.float64))
+        start_y = list(np.asarray(low_dim["leader_jp"], np.float64))
+        start_yd = list(np.asarray(low_dim.get("leader_jv", np.zeros(self.dof)), np.float64))
         if self.use_gripper:
             start_y.append(float(low_dim.get("gripper_pos", 0.0)))
             start_yd.append(float(low_dim.get("gripper_vel", 0.0)))
