@@ -58,7 +58,7 @@ class LearnerConfig:
     seed: int = 42
 
     use_gripper: bool = False
-    use_intervention_cost: bool = True
+    use_intervention_cost: bool = False
 
     # Base policy metadata. ``encoder.proprio_dim`` includes these values.
     base_policy: str = "none"

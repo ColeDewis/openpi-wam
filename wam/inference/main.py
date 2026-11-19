@@ -1,13 +1,12 @@
 """Run one base policy and one residual policy on the real robot.
 
 Example:
-    uv run python -m wam.inference.main \
-        --base_policy dmp \
-        --base_trajectory /path/to/episode.hdf5 \
-        --res_policy hilserl \
-        --res_checkpoint /path/to/checkpoint_dir \
-        --res_data_dir ./interventions
-"""
+uv run python -m wam.inference.main \
+    --base_policy dmp \
+    --res_policy hilserl \
+    --res_checkpoint /home/serg/projects/openpi-wam/checkpoints/hil/test_rlpd \
+    --res_data_dir /home/serg/projects/openpi-wam/interventions/test
+    """
 
 import argparse
 import collections
@@ -413,7 +412,7 @@ if __name__ == "__main__":
         choices=["none", "dmp", "openpi", "hilserl", "rltoken", "timm"],
         default="dmp",
     )
-    parser.add_argument("--base_trajectory", type=str, default="")
+    parser.add_argument("--base_trajectory", type=str, default="/home/serg/projects/wam-ros-docker/wam_ws/src/wam_haptic_dmps/dataset/episode_0.hdf5")
     parser.add_argument("--base_checkpoint", type=str, default="")
     parser.add_argument("--base_config", type=str, default="haptic_wam_pi05")
     parser.add_argument("--base_data_dir", type=str, default="./interventions")
